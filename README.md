@@ -135,13 +135,13 @@ If using your custom data fails, you have two options:
 *Disclaimer:* The downstream application for which you use these .ply files must do a ray-based evaluation of 3D Gaussians to get the correct results.
 Expect to see artifacts if the application uses the EWA splatting approach as in standard 3DGS.
 
-We provide a script `extract_ply.py` inside this repository, which extracts all 3D Gaussians from a trained model into a .ply file.
+We provide a script `export_ply.py` inside this repository, which extracts all 3D Gaussians from a trained model into a .ply file.
 For compatibility reasons, we provide the output in the same format as the 3DGS implementation by Inria.
 
 To use the script, move it to the `scripts/` directory of your NeRFICG installation.
 Running it is similar to the `inference.py` script:
 ```
-./scripts/extract_ply.py -d output/HTGS/<OUTPUT_DIRECTORY>
+./scripts/export_ply.py -d output/HTGS/<OUTPUT_DIRECTORY>
 ```
 
 ## Additional Notes
