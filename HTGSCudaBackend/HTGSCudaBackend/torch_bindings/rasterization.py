@@ -137,7 +137,7 @@ class HTGSRasterizer(torch.nn.Module):
         except ValueError:
             Logger.logWarning(f'Invalid rasterizer mode: {mode}. Defaulting to HYBRID_BLEND.')
             rasterizer_mode = RasterizerMode.HYBRID_BLEND
-        M = invert_camera_matrix(camera.properties.c2w)
+        M = invert_camera_matrix(camera.properties.c2w.cuda())
         # flip z-axis to match other 3dgs implementations' cuda backends
         M[2] *= -1
         center_x = camera.properties.width * 0.5 + camera.properties.principal_offset_x
