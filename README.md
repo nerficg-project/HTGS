@@ -228,7 +228,7 @@ If you use this code for your research projects, please consider a citation:
   journal = {Computer Graphics Forum},
   volume = {44},
   number = {2},
-  doi = {tba},
+  doi = {10.1111/cgf.70014},
   year = {2025},
   url = {https://fhahlbohm.github.io/htgs/}
 }
