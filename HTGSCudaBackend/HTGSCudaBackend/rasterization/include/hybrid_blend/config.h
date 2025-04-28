@@ -4,7 +4,7 @@
 
 #define DEF inline constexpr
 
-namespace inpc::rasterization::hybrid_blend::config {
+namespace htgs::rasterization::hybrid_blend::config {
     // debugging constants
     DEF bool debug_forward = false;
     DEF bool debug_backward = false;
@@ -29,6 +29,6 @@ namespace inpc::rasterization::hybrid_blend::config {
     DEF int block_size_blend = tile_width * tile_height;
 }
 
-namespace config = inpc::rasterization::hybrid_blend::config;
+namespace config = htgs::rasterization::hybrid_blend::config;
 
 #undef DEF

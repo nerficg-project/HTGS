@@ -4,7 +4,7 @@
 
 #define DEF inline constexpr
 
-namespace inpc::rasterization::alpha_blend_global_ordering::config {
+namespace htgs::rasterization::alpha_blend_global_ordering::config {
     // debugging constants
     DEF bool debug_forward = false;
     DEF bool debug_backward = false;
@@ -27,6 +27,6 @@ namespace inpc::rasterization::alpha_blend_global_ordering::config {
     DEF int block_size_blend = tile_width * tile_height;
 }
 
-namespace config = inpc::rasterization::alpha_blend_global_ordering::config;
+namespace config = htgs::rasterization::alpha_blend_global_ordering::config;
 
 #undef DEF

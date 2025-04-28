@@ -59,7 +59,6 @@ htgs::rasterization::forward_wrapper(
     const int total_sh_bases = sh_rest.size(1);
     const torch::TensorOptions float_options = torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA);
     const torch::TensorOptions byte_options = torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA);
-    const torch::TensorOptions bool_options = torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA);
     torch::Tensor image = torch::empty({3, height, width}, float_options);
     torch::Tensor per_primitive_buffers = torch::empty({0}, byte_options);
     torch::Tensor per_tile_buffers = torch::empty({0}, byte_options);
@@ -534,7 +533,7 @@ htgs::rasterization::update_max_weights_wrapper(
     const float near_plane,
     const float far_plane,
     const float scale_modifier,
-    const float weigth_threshold)
+    const float weight_threshold)
 {
     const RasterizerMode mode = static_cast<RasterizerMode>(rasterizer_mode);
     const int n_primitives = positions.size(0);
@@ -565,7 +564,7 @@ htgs::rasterization::update_max_weights_wrapper(
                 height,
                 near_plane,
                 far_plane,
-                weigth_threshold);
+                weight_threshold);
             break;
         case RasterizerMode::ALPHA_BLEND_FIRST_K:
             alpha_blend_first_k::update_max_weights(
@@ -585,7 +584,7 @@ htgs::rasterization::update_max_weights_wrapper(
                 height,
                 near_plane,
                 far_plane,
-                weigth_threshold);
+                weight_threshold);
             break;
         case RasterizerMode::ALPHA_BLEND_GLOBAL_ORDERING:
             alpha_blend_global_ordering::update_max_weights(
@@ -604,7 +603,7 @@ htgs::rasterization::update_max_weights_wrapper(
                 height,
                 near_plane,
                 far_plane,
-                weigth_threshold);
+                weight_threshold);
             break;
         case RasterizerMode::OIT_BLEND:
             oit_blend::update_max_weights(
@@ -623,7 +622,7 @@ htgs::rasterization::update_max_weights_wrapper(
                 height,
                 near_plane,
                 far_plane,
-                weigth_threshold);
+                weight_threshold);
             break;
         default:
             throw std::runtime_error("unsupported rasterizer mode");

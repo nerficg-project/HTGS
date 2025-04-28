@@ -94,6 +94,6 @@ namespace htgs::rasterization {
         const float near_plane,
         const float far_plane,
         const float scale_modifier,
-        const float weigth_threshold);
+        const float weight_threshold);
 
 }

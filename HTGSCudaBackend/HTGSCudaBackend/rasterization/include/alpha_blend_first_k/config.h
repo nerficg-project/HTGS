@@ -4,7 +4,7 @@
 
 #define DEF inline constexpr
 
-namespace inpc::rasterization::alpha_blend_first_k::config {
+namespace htgs::rasterization::alpha_blend_first_k::config {
     // debugging constants
     DEF bool debug_forward = false;
     DEF bool debug_backward = false;
@@ -28,6 +28,6 @@ namespace inpc::rasterization::alpha_blend_first_k::config {
     DEF int block_size_blend_backward = 256;
 }
 
-namespace config = inpc::rasterization::alpha_blend_first_k::config;
+namespace config = htgs::rasterization::alpha_blend_first_k::config;
 
 #undef DEF

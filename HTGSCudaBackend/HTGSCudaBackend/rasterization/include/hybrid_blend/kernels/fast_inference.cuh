@@ -180,8 +180,8 @@ namespace htgs::rasterization::hybrid_blend::kernels::fast_inference {
             for (int core_idx = 0; core_idx < K && !done; ++core_idx) {
                 const float2 rgba_premultiplied_rg = __half22float2(rgbas_premultiplied_core_rg[core_idx]);
                 const float2 rgba_premultiplied_ba = __half22float2(rgbas_premultiplied_core_ba[core_idx]);
-                const float3 rgba_premultiplied = make_float3(rgba_premultiplied_rg.x, rgba_premultiplied_rg.y, rgba_premultiplied_ba.x);
-                rgb_pixel += transmittance_core * rgba_premultiplied;
+                const float3 rgb_premultiplied = make_float3(rgba_premultiplied_rg.x, rgba_premultiplied_rg.y, rgba_premultiplied_ba.x);
+                rgb_pixel += transmittance_core * rgb_premultiplied;
                 transmittance_core *= 1.0f - rgba_premultiplied_ba.y;
                 if (transmittance_core < config::transmittance_threshold) done = true;
             }
