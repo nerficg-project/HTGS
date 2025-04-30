@@ -363,6 +363,7 @@ class Gaussians(torch.nn.Module):
         self.prune_points(mask)
         if self.use_3d_filter:
             self.filter_3D = self.filter_3D[~mask].contiguous()
+        self.densification_info = self.densification_info[:, ~mask].contiguous()
 
     def bake_activations(self):
         """Bakes relevant activation functions into the final parameters."""
