@@ -193,7 +193,6 @@ class Gaussians(torch.nn.Module):
         self.position_lr_scheduler = LRDecayPolicy(
             lr_init=training_wrapper.LEARNING_RATE_POSITION_INIT * self.training_cameras_extent,
             lr_final=training_wrapper.LEARNING_RATE_POSITION_FINAL * self.training_cameras_extent,
-            lr_delay_mult=training_wrapper.LEARNING_RATE_POSITION_DELAY_MULT,
             max_steps=training_wrapper.LEARNING_RATE_POSITION_MAX_STEPS)
 
         if training_wrapper.USE_3D_FILTER:
