@@ -85,7 +85,7 @@ void htgs::rasterization::oit_blend::backward(
 
     }, buffer_variant);
 
-    kernels::backward::preprocess_cu<<<div_round_up(n_primitives, config::block_size_preprocess),  config::block_size_preprocess>>>(
+    kernels::backward::preprocess_cu<<<div_round_up(n_primitives, config::block_size_preprocess), config::block_size_preprocess>>>(
         positions,
         scales,
         rotations,

@@ -75,7 +75,7 @@ void htgs::rasterization::alpha_blend_global_ordering::backward(
     );
     CHECK_CUDA(config::debug_backward, "blend_backward")
 
-    kernels::backward::preprocess_cu<<<div_round_up(n_primitives, config::block_size_preprocess),  config::block_size_preprocess>>>(
+    kernels::backward::preprocess_cu<<<div_round_up(n_primitives, config::block_size_preprocess), config::block_size_preprocess>>>(
         positions,
         sh_rest,
         per_primitive_buffers.n_touched_tiles,
