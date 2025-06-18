@@ -158,7 +158,7 @@ namespace htgs::rasterization::alpha_blend_global_ordering::kernels::backward {
                 rgb_pixel_new += blending_weight * rgb;
                 const float one_minus_alpha = 1.0f - alpha;
                 const float one_minus_alpha_rcp = 1.0f / fmaxf(one_minus_alpha, config::one_minus_alpha_eps);
-                const float dL_dalpha = dot(transmittance * rgb - (rgb_pixel.x - rgb_pixel_new.x) * one_minus_alpha_rcp, grad_rgb_pixel);
+                const float dL_dalpha = dot(transmittance * rgb - (rgb_pixel - rgb_pixel_new) * one_minus_alpha_rcp, grad_rgb_pixel);
                 if (dL_dalpha != 0.0f) {
                     const float dL_dopacity = dL_dalpha * G;
                     atomicAdd(&grad_opacities[primitive_idx], dL_dopacity);
