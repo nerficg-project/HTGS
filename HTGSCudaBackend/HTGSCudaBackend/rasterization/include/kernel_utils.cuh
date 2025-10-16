@@ -225,12 +225,12 @@ __forceinline__ __device__ float3 convert_sh_to_rgb_backward(
             grad_coefficients_ptr[7] = (0.54627421529603959f * xx - 0.54627421529603959f * yy) * grad_rgb;
             grad_direction_x = grad_direction_x + (1.0925484305920792f * y) * coefficients_ptr[3]
                                                 + (-1.0925484305920792f * z) * coefficients_ptr[6]
-                                                + (1.0925484305920792 * x) * coefficients_ptr[7];
+                                                + (1.0925484305920792f * x) * coefficients_ptr[7];
             grad_direction_y = grad_direction_y + (1.0925484305920792f * x) * coefficients_ptr[3]
                                                 + (-1.0925484305920792f * z) * coefficients_ptr[4]
-                                                + (-1.0925484305920792 * y) * coefficients_ptr[7];
+                                                + (-1.0925484305920792f * y) * coefficients_ptr[7];
             grad_direction_z = grad_direction_z + (-1.0925484305920792f * y) * coefficients_ptr[4]
-                                                + (1.8923493915151202 * z) * coefficients_ptr[5]
+                                                + (1.8923493915151202f * z) * coefficients_ptr[5]
                                                 + (-1.0925484305920792f * x) * coefficients_ptr[6];
             if (active_sh_bases > 9) {
                 grad_coefficients_ptr[8] = (0.59004358992664352f * y * (-3.0f * xx + yy)) * grad_rgb;
