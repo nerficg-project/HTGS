@@ -32,8 +32,8 @@ std::pair<int, int> htgs::rasterization::oit_blend::forward(
     const int total_sh_bases,
     const int width,
     const int height,
-    const float near,
-    const float far)
+    const float near_plane,
+    const float far_plane)
 {
     cudaMemcpyToSymbol(c_M3, M + 2, sizeof(float4), 0, cudaMemcpyDeviceToDevice);
     cudaMemcpyToSymbol(c_VPM, VPM, 4 * sizeof(float4), 0, cudaMemcpyDeviceToDevice);
@@ -42,7 +42,7 @@ std::pair<int, int> htgs::rasterization::oit_blend::forward(
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const dim3 block(config::tile_width, config::tile_height, 1);
     const int n_tiles = grid.x * grid.y;
-    const int end_bit = extract_end_bit(n_tiles);
+    const int end_bit = extract_end_bit(n_tiles - 1);
     const int n_pixels = width * height;
 
     constexpr bool store_MT3 = false, store_rgb = true, store_rgb_clamp_info = true;
@@ -85,8 +85,8 @@ std::pair<int, int> htgs::rasterization::oit_blend::forward(
         grid.y,
         active_sh_bases,
         total_sh_bases,
-        near,
-        far
+        near_plane,
+        far_plane
     );
     CHECK_CUDA(config::debug_forward, "preprocess")
 

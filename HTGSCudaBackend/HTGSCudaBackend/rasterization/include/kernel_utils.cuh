@@ -2,6 +2,11 @@
 
 #include "helper_math.h"
 
+#ifdef _WIN32
+#include <climits>
+#define __UINT32_MAX__ UINT32_MAX
+#endif
+
 __device__ __constant__ float4 c_M3;
 __device__ __constant__ float4 c_VPM[4];
 __device__ __constant__ float3 c_cam_position;
@@ -22,7 +27,7 @@ __device__ void swap(
     b = temp;
 }
 
-__forceinline__ __device__ Mat3x3 convert_quaterion_to_rotation_matrix(
+__forceinline__ __device__ Mat3x3 convert_quaternion_to_rotation_matrix(
     const float4& quaternion)
 {
     auto [r, x, y, z] = quaternion;
@@ -36,7 +41,7 @@ __forceinline__ __device__ Mat3x3 convert_quaterion_to_rotation_matrix(
     };
 }
 
-__forceinline__ __device__ float4 convert_quaterion_to_rotation_matrix_backward(
+__forceinline__ __device__ float4 convert_quaternion_to_rotation_matrix_backward(
     const float4& quaternion,
     const Mat3x3& dL_dR)
 {
@@ -75,19 +80,19 @@ __forceinline__ __device__ bool transform_and_cull(
     const uint grid_height,
     const uint tile_width,
     const uint tile_height,
-    const float near,
-    const float far,
+    const float near_plane,
+    const float far_plane,
     const float min_alpha_threshold_rcp,
     const float scale_modifier)
 {
     // early near/far plane culling
     z = dot(make_float3(M3), position_world) + M3.w;
-    if (z < near || z > far) return true;
+    if (z < near_plane || z > far_plane) return true;
 
     // load scale, rotation, and opacity
     const float3 scale = scales[primitive_idx];
     const float4 quaternion = rotations[primitive_idx];
-    const Mat3x3 R = convert_quaterion_to_rotation_matrix(quaternion);
+    const Mat3x3 R = convert_quaternion_to_rotation_matrix(quaternion);
 
     // compute screen-space bounding box
     u = make_float3(R.r11 * scale.x, R.r21 * scale.x, R.r31 * scale.x) * scale_modifier;

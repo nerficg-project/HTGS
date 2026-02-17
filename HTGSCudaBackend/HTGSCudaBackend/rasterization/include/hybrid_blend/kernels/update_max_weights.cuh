@@ -21,8 +21,8 @@ namespace htgs::rasterization::hybrid_blend::kernels::update_max_weights {
         const uint n_primitives,
         const uint grid_width,
         const uint grid_height,
-        const float near,
-        const float far)
+        const float near_plane,
+        const float far_plane)
     {
         const uint primitive_idx = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;
         if (primitive_idx >= n_primitives) return;
@@ -43,7 +43,7 @@ namespace htgs::rasterization::hybrid_blend::kernels::update_max_weights {
             position_world, opacity, M3,
             n_touched_tiles, screen_bounds, u, v, w, VPMT1, VPMT2, VPMT4, z,
             primitive_idx, grid_width, grid_height, config::tile_width, config::tile_height,
-            near, far, config::min_alpha_threshold_rcp, 1.0f
+            near_plane, far_plane, config::min_alpha_threshold_rcp, 1.0f
         )) return;
 
         // write intermediate results
@@ -125,13 +125,13 @@ namespace htgs::rasterization::hybrid_blend::kernels::update_max_weights {
                     const float denominator = dot(d, d);
                     if (numerator_rho2 > config::max_cutoff_sq * denominator) continue; // considering opacity requires log/sqrt -> slower
                     const float denominator_rcp = 1.0f / denominator;
-                    const float3 eval_point_diag = cross(d, m) * denominator_rcp;
-                    const float4 MT3 = collected_MT3[j];
-                    float depth = dot(make_float3(MT3), eval_point_diag) + MT3.w;
                     const float G = expf(-0.5f * numerator_rho2 * denominator_rcp);
                     float alpha = fminf(collected_opacity[j] * G, config::max_fragment_alpha);
                     if (alpha < config::min_alpha_threshold) continue;
-    
+                    const float3 eval_point_diag = cross(d, m) * denominator_rcp;
+                    const float4 MT3 = collected_MT3[j];
+                    float depth = dot(make_float3(MT3), eval_point_diag) + MT3.w;
+
                     if (depth < depths_core[K - 1] && alpha >= config::min_alpha_threshold_core) {
                         uint primitive_idx = collected_primitive_indices[j];
                         #pragma unroll

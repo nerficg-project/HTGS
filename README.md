@@ -23,8 +23,49 @@ You can find additional notes at the bottom of this page.
 
 ## Getting Started
 
-### Our Setup
-All our tests as well as experiments for the paper were conducted using the following setup:
+### Requirements
+
+- An NVIDIA GPU
+- Linux (preferred) or Windows
+- A recent CUDA SDK ([CUDA Toolkit 12.8](https://developer.nvidia.com/cuda-12-8-0-download-archive) recommended) and a compatible C++ compiler
+- [Anaconda / Miniconda](https://www.anaconda.com/docs/getting-started/miniconda/install) installed
+
+### Setup
+
+As a preparatory step, the [NeRFICG framework](https://github.com/nerficg-project/nerficg) needs to be set up.
+Please follow the instructions in its README to set up a compatible Conda environment.
+
+Now add HTGS as an additional method by cloning this repository into `src/Methods/HTGS`:
+```shell
+# HTTPS
+git clone https://github.com/nerficg-project/HTGS.git src/Methods/HTGS
+```
+or
+```shell
+# SSH
+git clone git@github.com:nerficg-project/HTGS.git src/Methods/HTGS
+```
+
+Finally, install all method-specific dependencies and CUDA extensions using:
+```shell
+python ./scripts/install.py -m HTGS
+```
+
+_Note: The framework determines on-the-fly what extra modules need to be installed. Sometimes this causes unnecessary errors/warnings that can interrupt the installation process. In this case, first try to rerun the command before investigating the error in detail._
+
+### Integration into Existing Codebases  
+
+Our CUDA backend can also be used as a standalone PyTorch extension outside the NeRFICG framework. To install it into an existing environment, use the following command:
+```shell
+pip install git+https://github.com/nerficg-project/HTGS/#subdirectory=HTGSCudaBackend --no-build-isolation
+```
+To then use, for example, our rasterizer, simply import its Python API:
+```python
+from HTGSCudaBackend.torch_bindings import rasterize, RasterizerSettings
+```
+
+### Paper Setup
+All our experiments for the paper were conducted using the following setup:
 - Operating System: Ubuntu 22.04
 - GPU: Nvidia GeForce RTX 4090
 - CUDA Driver Version: 535.183.01
@@ -32,53 +73,16 @@ All our tests as well as experiments for the paper were conducted using the foll
 - Python Version: 3.11
 - PyTorch Version: 2.5.1
 
-We have verified that everything works with CUDA Toolkit Version 12.4, but did not measure performance.
-We also observed a significant performance regression (~20%) when using CUDA Driver Version 560 but are unsure of the exact reason (remaining setup was unchanged, except for the CUDA Toolkit Version where we tried both 11.8 and 12.4).
-
-### Setup
-
-As a preparatory step, the [NeRFICG framework](https://github.com/nerficg-project/nerficg) needs to be set up.
-
-<details>
-<summary><span style="font-weight: bold;">TL;DR NeRFICG Setup</span></summary>
-
-- Clone the NeRFICG repository and its submodules:
-	```shell
-	git clone git@github.com:nerficg-project/nerficg.git --recursive && cd nerficg
-	```
- 
-- Install the dependencies listed in `scripts/condaEnv.sh`, or automatically create a new conda environment by executing the script:
-	```shell
-	./scripts/condaEnv.sh && conda activate nerficg
-	```
- 
-- [optional] For logging via [Weights & Biases](https://wandb.ai/site), run the following command and enter your account identifier:
-	```shell
-	wandb login
-	```
- 
-</details>
-<br>
-
-Now, you can directly add this project as an additional method:
-
-- Clone this repository into the `src/Methods/` directory:
-	```shell
-	git clone git@github.com:nerficg-project/HTGS.git src/Methods/HTGS
-	```
-- install all method-specific dependencies and CUDA extensions using:
-	```shell
-	./scripts/install.py -m HTGS
-	```
+_Note:_ We observed a significant performance regression (~20%) when using CUDA Driver Version 560 but are unsure of the exact reason (remaining setup was unchanged, except for the CUDA Toolkit Version where we tried both 11.8 and 12.4).
 
 ## Training and Inference
 
 The HTGS method is fully compatible with the NeRFICG scripts in the `scripts/` directory.
-This includes config file generation via `defaultConfig.py`,
+This includes config file generation via `create_config.py`,
 training via `train.py`,
 inference and performance benchmarking via `inference.py`,
-metric calculation via `generateTables.py`,
-and live rendering via `gui.py` (Linux only).
+metric calculation via `generate_tables.py`,
+and live rendering via `gui.py`.
 We also used these scripts for the experiments in our paper.
 
 For detailed instructions, please refer to the [NeRFICG framework repository](https://github.com/nerficg-project/nerficg).
@@ -86,17 +90,17 @@ For detailed instructions, please refer to the [NeRFICG framework repository](ht
 ### Example Configuration Files
 
 We provide exemplary configuration files for the garden scene from the [Mip-NeRF360](https://jonbarron.info/mipnerf360/) dataset as well as the playground scene from the [Tanks and Temples](https://www.tanksandtemples.org/) dataset.
-For the eight *intermediate* scenes from the Tanks and Temples dataset on which we evaluate our method in the paper, we used [our own calibration](https://cloud.tu-braunschweig.de/s/J5xYLLEdMnRwYPc) obtained using COLMAP.
+For the eight _intermediate_ scenes from the Tanks and Temples dataset on which we evaluate our method in the paper, we used [our own calibration](https://cloud.tu-braunschweig.de/s/J5xYLLEdMnRwYPc) obtained using COLMAP.
 We recommend copying the exemplary configuration files to the `configs/` directory.
 
-*Note:* There will be no documentation for the method-specific configuration parameters under `TRAINING.XXXX`/`MODEL.XXXX`/`RENDERER.XXXX`.
+_Note:_ There will be no documentation for the method-specific configuration parameters under `TRAINING.XXXX`/`MODEL.XXXX`/`RENDERER.XXXX`.
 Please conduct the code and/or our paper for understanding what they do.
 
 ### Using Custom Data
 
-While this method is compatible with most of the dataset loaders provided with the [NeRFICG framework](https://github.com/nerficg-project/nerficg),
-we recommend using exclusively the Mip-NeRF360 loader (`src/Datasets/MipNeRF360.py`) for custom data.
-It is compatible with the COLMAP format for single-camera captures:
+While this method is compatible with most of the dataloaders provided with the [NeRFICG framework](https://github.com/nerficg-project/nerficg),
+we used the Mip-NeRF360 loader (`src/Datasets/MipNeRF360.py`) for all experiments in the paper and recommend the COLMAP loader (`src/Datasets/Colmap.py`) for custom data.
+Both are compatible with the COLMAP format for single-camera captures and the COLMAP loader also supports multi-camera captures:
 ```
 custom_scene
 └───images
@@ -113,11 +117,17 @@ custom_scene
 │   │   ...
 ```
 
-To use it, just modify `DATASET.PATH` near the bottom of one of the exemplary configuration files. Furthermore, you may want to modify the following dataset configuration parameters:
-- `DATASET.IMAGE_SCALE_FACTOR`: Set this to `null` for using the original resolution or a between zero and one to train on downscaled images.
- If `DATASET.USE_PRECOMPUTED_DOWNSCALING` is set to `true` specifying `0.5`/`0.25`/`0.125` will load images from directories `images_2`/`images_4`/`images_8` respectively.
- We recommend using this feature and downscaling manually via, e.g., `mogrify -resize 50% *.jpg` for the best results.
-- `DATASET.TO_DEVICE`: Set this to `false` for large datasets or if you have less than 24 GB of VRAM.
+To use the Mip-NeRF360 loader, simply modify `DATASET.PATH` near the bottom of one of the exemplary configuration files. To switch a different loader, e.g., COLMAP, we recommend generating a new default configuration file using:
+```shell
+python ./scripts/create_config.py -m HTGS -d Colmap -o htgs_colmap
+```
+You probably want to change some of the default NeRFICG parameters to the values from the exemplary configuration files.
+
+Beyond those, noteworthy examples for configuration parameters you may want to modify are:
+- `TRAINING.DATA.PRELOADING_LEVEL`: Set this depending on the available RAM/VRAM as well as the size of your dataset (`2`: store training images in VRAM, `1`: in RAM, `0`: no preloading).
+- `DATASET.IMAGE_SCALE_FACTOR`: Set this to `null` for using the original resolution or alternatively to a value between zero and one to train on downscaled images.
+ The NeRFICG MipNeRF360 dataloader only supports specific downscaling factors (`0.5`/`0.25`/`0.125`) and will always load images from the respective directories (`images`/`images_2`/`images_4`/`images_8`).
+ We recommend using this feature and downscaling manually via, e.g., `mogrify -resize 50% *.jpg` for the best results. Alternatively, you can switch to, e.g., the COLMAP loader.
 - `DATASET.BACKGROUND_COLOR`: Will be ignored (see section "Additional Notes" for more information).
 - `DATASET.NEAR_PLANE`: Must not be too small to avoid precision issues. We used `0.2` for all scenes.
 - `DATASET.FAR_PLANE`: Set this generously, i.e., not too tight for your scene to avoid precision issues. We used `1000.0` for all scenes.
@@ -127,21 +137,20 @@ To use it, just modify `DATASET.PATH` near the bottom of one of the exemplary co
  While we recommend setting `DATASET.APPLY_PCA_RESCALE` to `false`, it can be turned on to scale the scene so that all camera poses are inside the \[-1, 1\] cube.
 
 If using your custom data fails, you have two options:
-1. (Easy) Re-calibrate using, e.g., `./scripts/colmap.py -i <path/to/your/scene> --camera_mode single` and add `-u` at the end if your images are distorted.
+1. (Easy) Re-calibrate using, e.g., `python ./scripts/colmap.py -i <path/to/your/scene> --camera_mode single` and add `-u` at the end if your images are distorted.
 2. (Advanced) Check the NeRFICG instructions for using custom data [here](https://github.com/nerficg-project/nerficg?tab=readme-ov-file#training-on-custom-image-sequences) and optionally dive into the NeRFICG code to extend one of the dataloaders to handle your data.
 
 ### Exporting as .ply
 
-*Disclaimer:* The downstream application for which you use these .ply files must do a ray-based evaluation of 3D Gaussians to get the correct results.
+_Disclaimer:_ The downstream application for which you use these .ply files must do a ray-based evaluation of 3D Gaussians to get the correct results.
 Expect to see artifacts if the application uses the EWA splatting approach as in standard 3DGS.
 
-We provide a script `export_ply.py` inside this repository, which extracts all 3D Gaussians from a trained model into a .ply file.
-For compatibility reasons, we provide the output in the same format as the 3DGS implementation by Inria.
+The NeRFICG framework provides a `convert_to_ply.py` script, which extracts all 3D Gaussians from a trained HTGS model into a .ply file.
+For compatibility reasons, we provide the output in the same format as the original 3DGS implementation.
 
-To use the script, move it to the `scripts/` directory of your NeRFICG installation.
 Running it is similar to the `inference.py` script:
 ```
-./scripts/export_ply.py -d output/HTGS/<OUTPUT_DIRECTORY>
+python ./scripts/convert_to_ply.py -d output/HTGS/<OUTPUT_DIRECTORY>
 ```
 
 ## Additional Notes

@@ -20,8 +20,8 @@ namespace htgs::rasterization::alpha_blend_first_k {
         const int n_primitives,
         const int width,
         const int height,
-        const float near,
-        const float far,
+        const float near_plane,
+        const float far_plane,
         const float weight_threshold);
 
 }

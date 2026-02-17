@@ -48,8 +48,8 @@ void htgs::rasterization::alpha_blend_first_k::inference(
     const int total_sh_bases,
     const int width,
     const int height,
-    const float near,
-    const float far,
+    const float near_plane,
+    const float far_plane,
     const float scale_modifier,
     const bool to_chw,
     const bool use_median_depth)
@@ -61,7 +61,7 @@ void htgs::rasterization::alpha_blend_first_k::inference(
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const dim3 block(config::tile_width, config::tile_height, 1);
     const int n_tiles = grid.x * grid.y;
-    const int end_bit = extract_end_bit(n_tiles);
+    const int end_bit = extract_end_bit(n_tiles - 1);
 
     constexpr bool store_rgb = true, store_rgb_clamp_info = false;
     char* per_primitive_buffers_blob = per_primitive_buffers_func(required<PerPrimitiveBuffers>(n_primitives, store_rgb, store_rgb_clamp_info));
@@ -100,8 +100,8 @@ void htgs::rasterization::alpha_blend_first_k::inference(
         grid.y,
         active_sh_bases,
         total_sh_bases,
-        near,
-        far,
+        near_plane,
+        far_plane,
         scale_modifier
     );
     CHECK_CUDA(config::debug_inference, "preprocess")

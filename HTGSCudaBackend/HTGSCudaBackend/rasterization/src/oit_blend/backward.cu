@@ -47,7 +47,7 @@ void htgs::rasterization::oit_blend::backward(
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const dim3 block(config::tile_width, config::tile_height, 1);
     const int n_tiles = grid.x * grid.y;
-    const int end_bit = extract_end_bit(n_tiles);
+    const int end_bit = extract_end_bit(n_tiles - 1);
     const int n_pixels = width * height;
 
     constexpr bool store_MT3 = false, store_rgba = true, store_rgb_clamp_info = true;

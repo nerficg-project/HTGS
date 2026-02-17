@@ -27,7 +27,7 @@ namespace htgs::rasterization::hybrid_blend {
         const int total_sh_bases,
         const int width,
         const int height,
-        const float near,
-        const float far);
+        const float near_plane,
+        const float far_plane);
 
 }

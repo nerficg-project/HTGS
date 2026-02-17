@@ -8,21 +8,25 @@ void htgs::filter3d::update_3d_filter_wrapper(
     const torch::Tensor& w2c,
     torch::Tensor& filter_3d,
     torch::Tensor& visibility_mask,
-    const uint width,
-    const uint height,
+    const int width,
+    const int height,
     const float focal_x,
     const float focal_y,
-    const float principal_offset_x,
-    const float principal_offset_y,
+    const float center_x,
+    const float center_y,
     const float near_plane,
     const float clipping_tolerance,
     const float distance2filter)
 {
-    const uint n_points = positions.size(0);
+    const int n_points = positions.size(0);
 
     const float bounds_factor = clipping_tolerance + 0.5f;
-    const float max_x_shifted = bounds_factor * static_cast<float>(width);
-    const float max_y_shifted = bounds_factor * static_cast<float>(height);
+    const float width_f = static_cast<float>(width);
+    const float height_f = static_cast<float>(height);
+    const float max_x_shifted = bounds_factor * width_f;
+    const float max_y_shifted = bounds_factor * height_f;
+    const float principal_offset_x = center_x - 0.5f * width_f;
+    const float principal_offset_y = center_y - 0.5f * height_f;
     const float left = (-max_x_shifted - principal_offset_x) / focal_x;
     const float right = (max_x_shifted - principal_offset_x) / focal_x;
     const float top = (-max_y_shifted - principal_offset_y) / focal_y;

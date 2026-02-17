@@ -39,7 +39,7 @@ namespace htgs::rasterization::hybrid_blend::kernels::backward {
         // load/re-compute scale and rotation
         const float3 scale = scales[primitive_idx];
         const float4 quaternion = rotations[primitive_idx];
-        const Mat3x3 R = convert_quaterion_to_rotation_matrix(quaternion);
+        const Mat3x3 R = convert_quaternion_to_rotation_matrix(quaternion);
 
         // third row and fourth column of VPM are not needed here
         const float3 VPM1 = make_float3(c_VPM[0]);
@@ -66,7 +66,7 @@ namespace htgs::rasterization::hybrid_blend::kernels::backward {
             dot(VPM_c2, dL_dVPMT_c1) * scale.x, dot(VPM_c2, dL_dVPMT_c2) * scale.y, dot(VPM_c2, dL_dVPMT_c3) * scale.z,
             dot(VPM_c3, dL_dVPMT_c1) * scale.x, dot(VPM_c3, dL_dVPMT_c2) * scale.y, dot(VPM_c3, dL_dVPMT_c3) * scale.z
         };
-        const float4 dL_drotation = convert_quaterion_to_rotation_matrix_backward(quaternion, dL_dR);
+        const float4 dL_drotation = convert_quaternion_to_rotation_matrix_backward(quaternion, dL_dR);
         grad_rotations[primitive_idx] = dL_drotation;
 
         // sh/position gradients from view-dependent color

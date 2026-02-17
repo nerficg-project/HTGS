@@ -14,7 +14,7 @@ namespace htgs::filter3d {
         const float right,
         const float top,
         const float bottom,
-        const float near,
+        const float near_plane,
         const float distance2filter);
 
 }

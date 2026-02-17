@@ -32,7 +32,7 @@ namespace htgs::rasterization::alpha_blend_first_k {
         float3* rgb = nullptr;
         bool* rgb_clamp_info = nullptr;
 
-        static PerPrimitiveBuffers from_blob(char*& blob, size_t n_primitives, bool store_rgb, bool store_rgb_clamp_info) {
+        static PerPrimitiveBuffers from_blob(char*& blob, int n_primitives, bool store_rgb, bool store_rgb_clamp_info) {
             PerPrimitiveBuffers buffers;
             obtain(blob, buffers.n_touched_tiles, n_primitives, 128);
             obtain(blob, buffers.offset, n_primitives, 128);
@@ -60,7 +60,7 @@ namespace htgs::rasterization::alpha_blend_first_k {
         cub::DoubleBuffer<uint> primitive_indices;
         cub::DoubleBuffer<KeyT> keys;
     
-        static PerInstanceBuffers from_blob(char*& blob, size_t n_instances, int end_bit) {
+        static PerInstanceBuffers from_blob(char*& blob, int n_instances, int end_bit) {
             PerInstanceBuffers buffers;
             KeyT* keys_current;
             obtain(blob, keys_current, n_instances, 128);
@@ -86,7 +86,7 @@ namespace htgs::rasterization::alpha_blend_first_k {
     struct PerTileBuffers {
         uint2* instance_ranges;
     
-        static PerTileBuffers from_blob(char*& blob, size_t n_tiles) {
+        static PerTileBuffers from_blob(char*& blob, int n_tiles) {
             PerTileBuffers buffers;
             obtain(blob, buffers.instance_ranges, n_tiles, 128);
             return buffers;
@@ -97,7 +97,7 @@ namespace htgs::rasterization::alpha_blend_first_k {
         uint* primitive_indices_core;
         float4* grad_info_core;
 
-        static PerPixelBuffers from_blob(char*& blob, size_t n_pixels, int K) {
+        static PerPixelBuffers from_blob(char*& blob, int n_pixels, int K) {
             PerPixelBuffers buffers;
             obtain(blob, buffers.primitive_indices_core, n_pixels * K, 128);
             obtain(blob, buffers.grad_info_core, n_pixels * K, 128);

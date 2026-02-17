@@ -1,18 +1,18 @@
-# -- coding: utf-8 --
-
 """HTGS/Model.py: Implementation of the model for the HTGS method."""
 
 import torch
+import numpy as np
 
 import Framework
+from Cameras.Perspective import PerspectiveCamera
 from Datasets.Base import BaseDataset
 from Datasets.utils import BasicPointCloud
 from Cameras.utils import quaternion_to_rotation_matrix
 from Logging import Logger
 from Methods.Base.Model import BaseModel
-from Methods.GaussianSplatting.utils import inverse_sigmoid, rgb_to_sh0, LRDecayPolicy
-from Optim.AdamUtils import replace_param_group_data, prune_param_groups, extend_param_groups
-from Thirdparty.SimpleKNN import distCUDA2
+from Optim.adam_utils import replace_param_group_data, prune_param_groups, extend_param_groups
+from Optim.lr_utils import LRDecayPolicy
+from Optim.knn_utils import compute_root_mean_squared_knn_distances
 from CudaUtils.MortonEncoding import morton_encode
 from Methods.HTGS.HTGSCudaBackend import update_3d_filter
 
@@ -44,8 +44,8 @@ class Gaussians(torch.nn.Module):
         # activation functions
         self.scale_activation = torch.nn.Identity() if pretrained else torch.exp
         self.inverse_scale_activation = torch.nn.Identity() if pretrained else torch.log
-        self.opacity_activation = torch.nn.Identity() if pretrained else torch.sigmoid
-        self.inverse_opacity_activation = torch.nn.Identity() if pretrained else inverse_sigmoid
+        self.opacity_activation = torch.nn.Identity() if pretrained else torch.special.expit
+        self.inverse_opacity_activation = torch.nn.Identity() if pretrained else torch.special.logit
         self.rotation_activation = torch.nn.Identity() if pretrained else torch.nn.functional.normalize
 
     @property
@@ -108,9 +108,12 @@ class Gaussians(torch.nn.Module):
         """Sets up a 3D filter (see https://arxiv.org/abs/2311.16493)."""
         self.use_3d_filter = True
         max_focal = 1.0e-12
-        # we do not use the default dataset iterator to avoid copies, thus it is important to not modify anything here
-        for camera_properties in dataset.data[dataset.mode]:
-            max_focal = max(max_focal, max(camera_properties.focal_x, camera_properties.focal_y))
+        for view in dataset:
+            if not isinstance(view.camera, PerspectiveCamera):
+                raise Framework.ModelError('3d filter only supports perspective cameras')
+            if view.camera.distortion is not None:
+                Logger.log_warning('3d filter ignores all distortion parameters')
+            max_focal = max(max_focal, max(view.camera.focal_x, view.camera.focal_y))
         # assume max_focal is focal length of the highest resolution camera
         self.distance2filter = dilation ** 0.5 / max_focal
         self.compute_3d_filter(dataset)
@@ -120,14 +123,23 @@ class Gaussians(torch.nn.Module):
         positions = self.get_positions.contiguous()
         filter_3d = torch.full((positions.shape[0], 1), fill_value=torch.finfo(torch.float32).max, device=positions.device, dtype=torch.float32)
         visibility_mask = torch.zeros((positions.shape[0], 1), device=positions.device, dtype=torch.bool)
-        # we do not use the default dataset iterator to avoid copies, thus it is important to not modify anything here
-        for camera_properties in dataset.data[dataset.mode]:
-            dataset.camera.setProperties(camera_properties)
+        for view in dataset:
+            if not isinstance(view.camera, PerspectiveCamera):
+                raise Framework.ModelError('3d filter only supports perspective cameras')
+            if view.camera.distortion is not None:
+                Logger.log_warning('3d filter ignores all distortion parameters')
             update_3d_filter(
-                dataset.camera,
                 positions,
+                view.w2c,
                 filter_3d,
                 visibility_mask,
+                view.camera.width,
+                view.camera.height,
+                view.camera.focal_x,
+                view.camera.focal_y,
+                view.camera.center_x,
+                view.camera.center_y,
+                view.camera.near_plane,
                 clipping_tolerance,
                 self.distance2filter,
             )
@@ -148,12 +160,12 @@ class Gaussians(torch.nn.Module):
         rgbs = torch.full_like(positions, fill_value=0.5) if point_cloud.colors is None else point_cloud.colors.cuda()
         n_initial_points = positions.shape[0]
         sh_all = torch.zeros((n_initial_points, (self.max_sh_degree + 1) ** 2, 3), dtype=torch.float32, device='cuda')
-        sh_all[:, 0] = rgb_to_sh0(rgbs)
+        sh_all[:, 0] = (rgbs - 0.5) / 0.28209479177387814
 
-        Logger.logInfo(f'Number of points at initialization: {n_initial_points:,}')
+        Logger.log_info(f'Number of points at initialization: {n_initial_points:,}')
 
-        dist2 = distCUDA2(positions).clamp_min(1e-7)
-        scales = self.inverse_scale_activation(torch.sqrt(dist2))[..., None].repeat(1, 3)
+        distances = compute_root_mean_squared_knn_distances(positions)
+        scales = self.inverse_scale_activation(distances)[..., None].repeat(1, 3)
         rotations = torch.zeros((n_initial_points, 4), dtype=torch.float32, device='cuda')
         rotations[:, 0] = 1.0
 
@@ -167,7 +179,7 @@ class Gaussians(torch.nn.Module):
         self._opacities = torch.nn.Parameter(opacities.contiguous())
         self.reset_densification_info()
 
-    def training_setup(self, training_wrapper, dataset: 'BaseDataset') -> None:
+    def training_setup(self, training_wrapper) -> None:
         """Sets up the optimizer."""
         self.percent_dense = training_wrapper.PERCENT_DENSE
 
@@ -184,19 +196,16 @@ class Gaussians(torch.nn.Module):
             from Thirdparty.Apex import FusedAdam
             # slightly faster than the PyTorch implementation
             self.optimizer = FusedAdam(param_groups, lr=0.0, eps=1e-15, adam_w_mode=False)
-            Logger.logInfo('using apex FusedAdam')
+            Logger.log_info('using apex FusedAdam')
         except Framework.ExtensionError:
-            Logger.logWarning('apex is not installed -> using the slightly slower PyTorch Adam instead')
-            Logger.logWarning('apex can be installed using ./scripts/install.py -e src/Thirdparty/Apex.py')
+            Logger.log_warning('apex is not installed -> using the slightly slower PyTorch Adam instead')
+            Logger.log_warning('apex can be installed using ./scripts/install.py -e src/Thirdparty/Apex.py')
             self.optimizer = torch.optim.Adam(param_groups, lr=0.0, eps=1e-15, fused=True)
 
         self.position_lr_scheduler = LRDecayPolicy(
             lr_init=training_wrapper.LEARNING_RATE_POSITION_INIT * self.training_cameras_extent,
             lr_final=training_wrapper.LEARNING_RATE_POSITION_FINAL * self.training_cameras_extent,
             max_steps=training_wrapper.LEARNING_RATE_POSITION_MAX_STEPS)
-
-        if training_wrapper.USE_3D_FILTER:
-            self.setup_3d_filter(dataset)
 
     def update_learning_rate(self, iteration: int) -> None:
         """ Learning rate scheduling per step """
@@ -287,11 +296,11 @@ class Gaussians(torch.nn.Module):
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros(n_init_points, dtype=torch.float32, device='cuda')
         padded_grad[:grads.shape[0]] = grads.squeeze()
-        selected_pts_mask = torch.where(padded_grad >= grad_threshold, True, False)
+        selected_pts_mask = padded_grad >= grad_threshold
         if grads_abs is not None:
             padded_grad_abs = torch.zeros(n_init_points, dtype=torch.float32, device='cuda')
             padded_grad_abs[:grads_abs.shape[0]] = grads_abs.squeeze()
-            selected_pts_mask |= torch.where(padded_grad_abs >= grad_abs_threshold, True, False)
+            selected_pts_mask |= padded_grad_abs >= grad_abs_threshold
         selected_pts_mask &= torch.max(self.get_scales, dim=1).values > self.percent_dense * self.training_cameras_extent
 
         stds = self.get_scales[selected_pts_mask].repeat(2, 1)
@@ -312,9 +321,9 @@ class Gaussians(torch.nn.Module):
     def duplicate(self, grads: torch.Tensor, grad_threshold: float, grads_abs: torch.Tensor | None, grad_abs_threshold: float | None) -> None:
         """Densify by duplicating Gaussians that satisfy the gradient condition."""
         # Extract points that satisfy the gradient condition
-        selected_pts_mask = torch.where(grads.flatten() >= grad_threshold, True, False)
+        selected_pts_mask = grads.flatten() >= grad_threshold
         if grads_abs is not None:
-            selected_pts_mask |= torch.where(grads_abs.flatten() >= grad_abs_threshold, True, False)
+            selected_pts_mask |= grads_abs.flatten() >= grad_abs_threshold
         selected_pts_mask &= torch.max(self.get_scales, dim=1).values <= self.percent_dense * self.training_cameras_extent
 
         if Gaussians.GOF_DENSIFICATION_CLONE:
@@ -392,6 +401,39 @@ class Gaussians(torch.nn.Module):
         self._scales.data = self._scales[order].contiguous()
         self._opacities.data = self._opacities[order].contiguous()
 
+    @torch.no_grad()
+    def as_ply_dict(self) -> dict[str, np.ndarray]:
+        """Returns the model as a ply-compatible dictionary using structured numpy arrays."""
+        if self.get_positions.shape[0] == 0:
+            return {}
+
+        # construct attributes
+        positions = self.get_positions.detach().contiguous().cpu().numpy()
+        sh_0 = self.get_sh_0.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        sh_rest = self.get_sh_rest.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        opacities = self.get_opacities.logit().detach().contiguous().cpu().numpy()  # most viewers expect unactivated opacities
+        scales = self.get_scales.log().detach().contiguous().cpu().numpy()  # most viewers expect unactivated scales
+        rotations = self.get_rotations.detach().contiguous().cpu().numpy()
+        attributes = np.concatenate((positions, sh_0, sh_rest, opacities, scales, rotations), axis=1)
+
+        # construct structured array
+        attribute_names = (
+              ['x', 'y', 'z']                                    # 3d mean
+            + ['f_dc_0', 'f_dc_1', 'f_dc_2']                     # 0-th SH degree coefficients
+            + [f'f_rest_{i}' for i in range(sh_rest.shape[-1])]  # remaining SH degree coefficients
+            + ['opacity']                                        # opacity (pre-activation)
+            + ['scale_0', 'scale_1', 'scale_2']                  # 3d scale (pre-activation)
+            + ['rot_0', 'rot_1', 'rot_2', 'rot_3']               # rotation quaternion
+        )
+        dtype = 'f4'  # store all attributes as float32 for compatibility
+        full_dtype = [(attribute_name, dtype) for attribute_name in attribute_names]
+        vertices = np.empty(positions.shape[0], dtype=full_dtype)
+
+        # insert attributes into structured array
+        vertices[:] = list(map(tuple, attributes))
+
+        return {'vertex': vertices}
+
 
 @Framework.Configurable.configure(
     SH_DEGREE=3,
@@ -408,3 +450,14 @@ class HTGSModel(BaseModel):
         pretrained = self.num_iterations_trained > 0
         self.gaussians = Gaussians(self.SH_DEGREE, pretrained)
         return self
+
+    def get_ply_dict(self) -> dict[str, np.ndarray | list[str]]:
+        """Returns the model as a ply-compatible dictionary using structured numpy arrays."""
+        data: dict[str, np.ndarray | list[str]] = {}
+        if self.gaussians is None or not (data := self.gaussians.as_ply_dict()):
+            return data
+
+        # add method-specific comments
+        data['comments'] = ['SplatRenderMode: default', 'Generated with NeRFICG/HTGS']
+
+        return data

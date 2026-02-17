@@ -19,8 +19,8 @@ namespace htgs::rasterization::alpha_blend_global_ordering {
         const int n_primitives,
         const int width,
         const int height,
-        const float near,
-        const float far,
+        const float near_plane,
+        const float far_plane,
         const float weight_threshold);
 
 }

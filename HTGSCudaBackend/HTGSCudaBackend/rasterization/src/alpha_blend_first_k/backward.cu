@@ -60,7 +60,7 @@ void htgs::rasterization::alpha_blend_first_k::backward(
     cudaMemcpyToSymbol(c_cam_position, cam_position, sizeof(float3), 0, cudaMemcpyDeviceToDevice);
 
     const int n_tiles = div_round_up(width, config::tile_width) * div_round_up(height, config::tile_height);
-    const int end_bit = extract_end_bit(n_tiles);
+    const int end_bit = extract_end_bit(n_tiles - 1);
     const int n_pixels = width * height;
     const int n_fragments = K * n_pixels;
 

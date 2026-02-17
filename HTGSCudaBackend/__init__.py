@@ -11,8 +11,8 @@ __install_command__ = [
 ]
 
 try:
-    from .HTGSCudaBackend.torch_bindings.rasterization import HTGSRasterizer
+    from .HTGSCudaBackend.torch_bindings.rasterization import diff_rasterize, rasterize, fast_rasterize, update_max_weights, RasterizerSettings, RasterizerMode
     from .HTGSCudaBackend.torch_bindings.filter3d import update_3d_filter
-    __all__ = ['HTGSRasterizer', 'update_3d_filter']
+    __all__ = ['diff_rasterize', 'rasterize', 'fast_rasterize', 'update_max_weights', 'RasterizerSettings', 'RasterizerMode', 'update_3d_filter']
 except ImportError as e:
     raise Framework.ExtensionError(name=__extension_name__, install_command=__install_command__)

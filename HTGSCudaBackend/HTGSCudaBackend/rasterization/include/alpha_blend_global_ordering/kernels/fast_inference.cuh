@@ -26,8 +26,8 @@ namespace htgs::rasterization::alpha_blend_global_ordering::kernels::fast_infere
         const uint grid_height,
         const uint active_sh_bases,
         const uint total_sh_bases,
-        const float near,
-        const float far,
+        const float near_plane,
+        const float far_plane,
         const float scale_modifier)
     {
         const uint primitive_idx = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;
@@ -49,7 +49,7 @@ namespace htgs::rasterization::alpha_blend_global_ordering::kernels::fast_infere
             position_world, opacity, M3,
             n_touched_tiles, screen_bounds, u, v, w, VPMT1, VPMT2, VPMT4, z,
             primitive_idx, grid_width, grid_height, config::tile_width, config::tile_height,
-            near, far, config::min_alpha_threshold_rcp, scale_modifier
+            near_plane, far_plane, config::min_alpha_threshold_rcp, scale_modifier
         )) return;
 
         // write intermediate results

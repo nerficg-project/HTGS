@@ -212,7 +212,7 @@ namespace htgs::rasterization::alpha_blend_global_ordering::kernels::backward {
                     // load/re-compute scale and rotation
                     const float3 scale = scales[primitive_idx];
                     const float4 quaternion = rotations[primitive_idx];
-                    const Mat3x3 R = convert_quaterion_to_rotation_matrix(quaternion);
+                    const Mat3x3 R = convert_quaternion_to_rotation_matrix(quaternion);
 
                     // scale gradient
                     const float3 R_c1 = make_float3(R.r11, R.r21, R.r31);
@@ -233,7 +233,7 @@ namespace htgs::rasterization::alpha_blend_global_ordering::kernels::backward {
                         dot(VPM_c2, dL_dVPMT_c1) * scale.x, dot(VPM_c2, dL_dVPMT_c2) * scale.y, dot(VPM_c2, dL_dVPMT_c3) * scale.z,
                         dot(VPM_c3, dL_dVPMT_c1) * scale.x, dot(VPM_c3, dL_dVPMT_c2) * scale.y, dot(VPM_c3, dL_dVPMT_c3) * scale.z
                     };
-                    const float4 dL_drotation = convert_quaterion_to_rotation_matrix_backward(quaternion, dL_dR);
+                    const float4 dL_drotation = convert_quaternion_to_rotation_matrix_backward(quaternion, dL_dR);
                     atomicAdd(&grad_rotations[primitive_idx].x, dL_drotation.x);
                     atomicAdd(&grad_rotations[primitive_idx].y, dL_drotation.y);
                     atomicAdd(&grad_rotations[primitive_idx].z, dL_drotation.z);

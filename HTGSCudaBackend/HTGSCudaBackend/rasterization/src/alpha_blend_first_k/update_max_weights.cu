@@ -42,8 +42,8 @@ void htgs::rasterization::alpha_blend_first_k::update_max_weights(
     const int n_primitives,
     const int width,
     const int height,
-    const float near,
-    const float far,
+    const float near_plane,
+    const float far_plane,
     const float weight_threshold)
 {
     cudaMemcpyToSymbol(c_M3, M + 2, sizeof(float4), 0, cudaMemcpyDeviceToDevice);
@@ -52,7 +52,7 @@ void htgs::rasterization::alpha_blend_first_k::update_max_weights(
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const dim3 block(config::tile_width, config::tile_height, 1);
     const int n_tiles = grid.x * grid.y;
-    const int end_bit = extract_end_bit(n_tiles);
+    const int end_bit = extract_end_bit(n_tiles - 1);
     
     constexpr bool store_rgba = false, store_rgb_clamp_info = false;
     char* per_primitive_buffers_blob = per_primitive_buffers_func(required<PerPrimitiveBuffers>(n_primitives, store_rgba, store_rgb_clamp_info));
@@ -83,8 +83,8 @@ void htgs::rasterization::alpha_blend_first_k::update_max_weights(
         n_primitives,
         grid.x,
         grid.y,
-        near,
-        far
+        near_plane,
+        far_plane
     );
     CHECK_CUDA(config::debug_update_max_weights, "preprocess")
 

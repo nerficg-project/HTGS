@@ -27,8 +27,8 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::forward {
         const uint grid_height,
         const uint active_sh_bases,
         const uint total_sh_bases,
-        const float near,
-        const float far)
+        const float near_plane,
+        const float far_plane)
     {
         const uint primitive_idx = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;
         if (primitive_idx >= n_primitives) return;
@@ -49,7 +49,7 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::forward {
             position_world, opacity, M3,
             n_touched_tiles, screen_bounds, u, v, w, VPMT1, VPMT2, VPMT4, z,
             primitive_idx, grid_width, grid_height, config::tile_width, config::tile_height,
-            near, far, config::min_alpha_threshold_rcp, 1.0f
+            near_plane, far_plane, config::min_alpha_threshold_rcp, 1.0f
         )) return;
 
         // write intermediate results

@@ -1,5 +1,3 @@
-# -- coding: utf-8 --
-
 """HTGS/Trainer.py: Implementation of the trainer for HTGS."""
 
 import torch
@@ -9,7 +7,7 @@ from Datasets.Base import BaseDataset
 from Datasets.utils import BasicPointCloud
 from Logging import Logger
 from Methods.Base.GuiTrainer import GuiTrainer
-from Methods.Base.utils import preTrainingCallback, trainingCallback, postTrainingCallback
+from Methods.Base.utils import pre_training_callback, training_callback, post_training_callback
 from Methods.HTGS.Loss import HTGSLoss
 from Optim.Samplers.DatasetSamplers import DatasetSampler
 
@@ -50,47 +48,52 @@ class HTGSTrainer(GuiTrainer):
         self.train_sampler = None
         self.loss = HTGSLoss(loss_config=self.LOSS)
 
-    @preTrainingCallback(priority=50)
+    @pre_training_callback(priority=50)
     @torch.no_grad()
-    def createSampler(self, _, dataset: 'BaseDataset') -> None:
+    def create_sampler(self, _, dataset: 'BaseDataset') -> None:
         """Creates the sampler."""
         self.train_sampler = DatasetSampler(dataset=dataset.train(), random=True)
 
-    @preTrainingCallback(priority=40)
+    @pre_training_callback(priority=40)
     @torch.no_grad()
-    def setupGaussians(self, _, dataset: 'BaseDataset') -> None:
+    def setup_gaussians(self, _, dataset: 'BaseDataset') -> None:
         """Sets up the model."""
+        # check background color
+        if (dataset.default_camera.background_color != 0.0).any():
+            raise Framework.TrainingError('HTGS currently only supports black background')
         dataset.train()
-        camera_centers = torch.stack([camera_properties.T for camera_properties in dataset])
+        camera_centers = torch.stack([view.position for view in dataset])
         radius = (1.1 * torch.max(torch.linalg.norm(camera_centers - torch.mean(camera_centers, dim=0), dim=1))).item()
-        Logger.logInfo(f'Training cameras extent: {radius:.2f}')
+        Logger.log_info(f'Training cameras extent: {radius:.2f}')
 
         if dataset.point_cloud is not None:
             point_cloud = dataset.point_cloud
         else:
             n_random_points = 100_000
-            min_bounds, max_bounds = dataset.getBoundingBox()
+            min_bounds, max_bounds = dataset.bounding_box.min_max
             extent = max_bounds - min_bounds
             point_cloud = BasicPointCloud(torch.rand(n_random_points, 3, dtype=torch.float32, device=min_bounds.device) * extent + min_bounds)
         self.model.gaussians.initialize_from_point_cloud(point_cloud, radius)
-        self.model.gaussians.training_setup(self, dataset)
+        self.model.gaussians.training_setup(self)
+        if self.USE_3D_FILTER:
+            self.model.gaussians.setup_3d_filter(dataset)
 
-    @trainingCallback(priority=110, start_iteration=1000, iteration_stride=1000)
+    @training_callback(priority=110, start_iteration=1000, iteration_stride=1000)
     @torch.no_grad()
-    def increaseSHDegree(self, *_) -> None:
+    def increase_sh_degree(self, *_) -> None:
         """Increase the number of used SH coefficients up to a maximum degree."""
         self.model.gaussians.increase_used_sh_degree()
 
-    @trainingCallback(active='USE_VISIBILITY_PRUNING', priority=105, start_iteration=15000, iteration_stride=1000)
+    @training_callback(active='USE_VISIBILITY_PRUNING', priority=105, start_iteration=15000, iteration_stride=1000)
     @torch.no_grad()
-    def importanceBasedPruning(self, iteration: int, dataset: 'BaseDataset') -> None:
+    def importance_based_pruning(self, iteration: int, dataset: 'BaseDataset') -> None:
         """Pruning from RadSplat (see https://arxiv.org/abs/2403.13806)."""
         if iteration in [16000, 24000]:
-            max_blending_weights = self.renderer.computeMaxWeights(dataset.train(), threshold=self.VISIBILITY_PRUNING_THRESHOLD)
+            max_blending_weights = self.renderer.compute_max_weights(dataset.train(), threshold=self.VISIBILITY_PRUNING_THRESHOLD)
             self.model.gaussians.importance_pruning(max_blending_weights, threshold=self.VISIBILITY_PRUNING_THRESHOLD)
 
-    @trainingCallback(priority=100)
-    def trainingIteration(self, iteration: int, dataset: 'BaseDataset') -> None:
+    @training_callback(priority=100)
+    def training_iteration(self, iteration: int, dataset: 'BaseDataset') -> None:
         """Performs a training step without actually doing the optimizer step."""
         # init modes
         self.model.train()
@@ -98,20 +101,23 @@ class HTGSTrainer(GuiTrainer):
         self.loss.train()
         # update learning rate
         self.model.gaussians.update_learning_rate(iteration + 1)
-        # get random sample from dataset
-        camera_properties = self.train_sampler.get(dataset=dataset)['camera_properties']
-        dataset.camera.setProperties(camera_properties)
-        # render sample
-        image = self.renderer.renderImageTraining(
-            camera=dataset.camera,
+        # get random view
+        view = self.train_sampler.get(dataset=dataset)['view']
+        # render
+        image = self.renderer.render_image_training(
+            view=view,
             update_densification_info=iteration <= self.DENSIFY_END_ITERATION,
             use_distance_scaling=self.USE_DISTANCE_SCALING,
         )
         # calculate loss
-        loss = self.loss(image, camera_properties.rgb)
+        # compose gt with background color if needed  # FIXME: integrate into data model
+        rgb_gt = view.rgb
+        if (alpha_gt := view.alpha) is not None:
+            rgb_gt = rgb_gt * alpha_gt  # htgs only supports black background
+        loss = self.loss(image, rgb_gt)
         loss.backward()
 
-    @trainingCallback(priority=90, start_iteration='DENSIFY_START_ITERATION', end_iteration='DENSIFY_END_ITERATION', iteration_stride='DENSIFICATION_INTERVAL')
+    @training_callback(priority=90, start_iteration='DENSIFY_START_ITERATION', end_iteration='DENSIFY_END_ITERATION', iteration_stride='DENSIFICATION_INTERVAL')
     @torch.no_grad()
     def densify(self, iteration: int, dataset: 'BaseDataset') -> None:
         """Apply densification."""
@@ -122,50 +128,51 @@ class HTGSTrainer(GuiTrainer):
         if self.USE_3D_FILTER:
             self.model.gaussians.compute_3d_filter(dataset.train())
 
-    @trainingCallback(active='USE_OPACITY_RESET', priority=80, start_iteration='OPACITY_RESET_INTERVAL', end_iteration='DENSIFY_END_ITERATION', iteration_stride='OPACITY_RESET_INTERVAL')
+    @training_callback(active='USE_OPACITY_RESET', priority=80, start_iteration='OPACITY_RESET_INTERVAL', end_iteration='DENSIFY_END_ITERATION', iteration_stride='OPACITY_RESET_INTERVAL')
     @torch.no_grad()
-    def resetOpacities(self, iteration: int, _) -> None:
+    def reset_opacities(self, iteration: int, _) -> None:
         """Reset opacities."""
         if iteration == self.DENSIFY_END_ITERATION:
             return
         self.model.gaussians.reset_opacities(max_opacity=self.OPACITY_RESET_MAX_OPACITY)
 
-    @trainingCallback(active='USE_OPACITY_DECAY', priority=80, start_iteration='DENSIFY_START_ITERATION', end_iteration='DENSIFY_END_ITERATION', iteration_stride=50)
+    @training_callback(active='USE_OPACITY_DECAY', priority=80, start_iteration='DENSIFY_START_ITERATION', end_iteration='DENSIFY_END_ITERATION', iteration_stride=50)
     @torch.no_grad()
-    def decayOpacities(self, iteration: int, _) -> None:
+    def decay_opacities(self, iteration: int, _) -> None:
         """Decay opacities."""
         if iteration == self.DENSIFY_START_ITERATION:
             return
         self.model.gaussians.decay_opacities(decay_factor=0.9995)
 
-    @trainingCallback(active='USE_3D_FILTER', priority=75, start_iteration='DENSIFY_END_ITERATION', iteration_stride=100)
+    @training_callback(active='USE_3D_FILTER', priority=75, start_iteration='DENSIFY_END_ITERATION', iteration_stride=100)
     @torch.no_grad()
-    def recompute3DFilter(self, iteration: int, dataset: 'BaseDataset') -> None:
+    def recompute_3d_filter(self, iteration: int, dataset: 'BaseDataset') -> None:
         """Recompute 3D filter."""
         if self.DENSIFY_END_ITERATION < iteration < self.NUM_ITERATIONS - 100:
             self.model.gaussians.compute_3d_filter(dataset.train())
 
-    @trainingCallback(priority=70)
+    @training_callback(priority=70)
     @torch.no_grad()
-    def performOptimizerStep(self, *_) -> None:
+    def perform_optimizer_step(self, *_) -> None:
         """Update parameters."""
         self.model.gaussians.optimizer.step()
         self.model.gaussians.optimizer.zero_grad()
 
-    @trainingCallback(active='WANDB.ACTIVATE', priority=10, iteration_stride='WANDB.INTERVAL')
+    @training_callback(active='WANDB.ACTIVATE', priority=10, iteration_stride='WANDB.INTERVAL')
     @torch.no_grad()
-    def logWandB(self, iteration: int, dataset: 'BaseDataset') -> None:
+    def log_wandb(self, iteration: int, dataset: 'BaseDataset') -> None:
         """Adds primitive count to default Weights & Biases logging."""
         Framework.wandb.log({
             'n_primitives': self.model.gaussians.get_positions.shape[0]
         }, step=iteration)
         # default logging
-        super().logWandB(iteration, dataset)
+        super().log_wandb(iteration, dataset)
 
-    @postTrainingCallback(priority=1000)
+    @post_training_callback(priority=1000)
     @torch.no_grad()
-    def bakeActivations(self, *_) -> None:
+    def bake_activations(self, *_) -> None:
         """Bake relevant activation functions after training."""
         self.model.gaussians.bake_activations()
+        Logger.log_info(f'final number of primitives: {self.model.gaussians.get_positions.shape[0]:,}')
         # delete optimizer to save memory
         self.model.gaussians.optimizer = None

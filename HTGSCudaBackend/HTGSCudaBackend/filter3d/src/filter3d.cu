@@ -14,7 +14,7 @@ void htgs::filter3d::update_3d_filter(
     const float right,
     const float top,
     const float bottom,
-    const float near,
+    const float near_plane,
     const float distance2filter)
 {
     update_3d_filter_cu<<<div_round_up(n_points, config::block_size_update_3d_filter), config::block_size_update_3d_filter>>>(
@@ -27,7 +27,7 @@ void htgs::filter3d::update_3d_filter(
         right,
         top,
         bottom,
-        near,
+        near_plane,
         distance2filter);
     CHECK_CUDA(config::debug, "update_3d_filter_cu");
 }

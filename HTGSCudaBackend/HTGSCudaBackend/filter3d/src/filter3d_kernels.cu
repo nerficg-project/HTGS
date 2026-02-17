@@ -13,7 +13,7 @@ namespace htgs::filter3d {
         const float right,
         const float top,
         const float bottom,
-        const float near,
+        const float near_plane,
         const float distance2filter)
     {
         const uint point_idx = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;
@@ -21,7 +21,7 @@ namespace htgs::filter3d {
         const float3 position_world = positions[point_idx];
         const float4 w2c_r3 = w2c[2];
         const float z = dot(make_float3(w2c_r3), position_world) + w2c_r3.w;
-        if (z < near) return;
+        if (z < near_plane) return;
         const float4 w2c_r1 = w2c[0];
         const float x_clip = dot(make_float3(w2c_r1), position_world) + w2c_r1.w;
         if (x_clip < left * z || x_clip > right * z) return;
