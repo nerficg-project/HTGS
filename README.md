@@ -126,13 +126,13 @@ You probably want to change some of the default NeRFICG parameters to the values
 Beyond those, noteworthy examples for configuration parameters you may want to modify are:
 - `TRAINING.DATA.PRELOADING_LEVEL`: Set this depending on the available RAM/VRAM as well as the size of your dataset (`2`: store training images in VRAM, `1`: in RAM, `0`: no preloading).
 - `DATASET.IMAGE_SCALE_FACTOR`: Set this to `null` for using the original resolution or alternatively to a value between zero and one to train on downscaled images.
- The NeRFICG MipNeRF360 dataloader only supports specific downscaling factors (`0.5`/`0.25`/`0.125`) and will always load images from the respective directories (`images`/`images_2`/`images_4`/`images_8`).
- We recommend using this feature and downscaling manually via, e.g., `mogrify -resize 50% *.jpg` for the best results. Alternatively, you can switch to, e.g., the COLMAP loader.
+ The NeRFICG MipNeRF360 dataloader has special support for specific downscaling factors (`0.5`/`0.25`/`0.125`), where it will always load images from the respective directory (`images`/`images_2`/`images_4`/`images_8`).
+ We recommend using this feature and downscaling custom data manually via, e.g., `mogrify -resize 50% *.jpg` for the best results. Alternatively, you can switch to, e.g., the COLMAP loader.
 - `DATASET.BACKGROUND_COLOR`: Will be ignored (see section "Additional Notes" for more information).
 - `DATASET.NEAR_PLANE`: Must not be too small to avoid precision issues. We used `0.2` for all scenes.
 - `DATASET.FAR_PLANE`: Set this generously, i.e., not too tight for your scene to avoid precision issues. We used `1000.0` for all scenes.
 - `DATASET.TEST_STEP`: Set to `8` for the established evaluation protocol. Set to `0` to use all images for training.
-- `DATASET.APPLY_PCA`: Tries to align the world space so that the up-axis is parallel to the direction of gravity using principal component analysis. 
+- `DATASET.APPLY_PCA`: Tries to align the world space so that the up-axis is parallel to the direction of gravity using principal component analysis.
  Although it does not always work, we recommend setting this to `true` if you want to view the final model inside a GUI.
  While we recommend setting `DATASET.APPLY_PCA_RESCALE` to `false`, it can be turned on to scale the scene so that all camera poses are inside the \[-1, 1\] cube.
 
