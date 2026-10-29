@@ -10,6 +10,8 @@
 
 void htgs::rasterization::oit_blend::backward(
     const float* grad_image,
+    const float* grad_alpha,
+    const float* alpha,
     const float3* positions,
     const float3* scales,
     const float4* rotations,
@@ -38,9 +40,11 @@ void htgs::rasterization::oit_blend::backward(
     const int height,
     const int n_instances,
     const int instance_primitive_indices_selector,
+    const float max_focal,
+    const bool use_aaa_mode,
     const bool use_distance_scaling)
 {
-    if (use_distance_scaling) cudaMemcpyToSymbol(c_M3, M + 2, sizeof(float4), 0, cudaMemcpyDeviceToDevice);
+    cudaMemcpyToSymbol(c_M, M, 3 * sizeof(float4), 0, cudaMemcpyDeviceToDevice);
     cudaMemcpyToSymbol(c_VPM, VPM, 4 * sizeof(float4), 0, cudaMemcpyDeviceToDevice);
     cudaMemcpyToSymbol(c_cam_position, cam_position, sizeof(float3), 0, cudaMemcpyDeviceToDevice);
 
@@ -50,8 +54,8 @@ void htgs::rasterization::oit_blend::backward(
     const int end_bit = extract_end_bit(n_tiles - 1);
     const int n_pixels = width * height;
 
-    constexpr bool store_MT3 = false, store_rgba = true, store_rgb_clamp_info = true;
-    PerPrimitiveBuffers per_primitive_buffers = PerPrimitiveBuffers::from_blob(per_primitive_buffers_blob, n_primitives, store_MT3, store_rgba, store_rgb_clamp_info);
+    constexpr bool store_MT3 = false, store_rgba = true, store_rgb_clamp_info = true, store_opacity = false;
+    PerPrimitiveBuffers per_primitive_buffers = PerPrimitiveBuffers::from_blob(per_primitive_buffers_blob, n_primitives, store_MT3, store_rgba, store_rgb_clamp_info, store_opacity);
     PerTileBuffers per_tile_buffers = PerTileBuffers::from_blob(per_tile_buffers_blob, n_tiles);
     PerPixelBuffers per_pixel_buffers = PerPixelBuffers::from_blob(per_pixel_buffers_blob, n_pixels);
 
@@ -71,6 +75,8 @@ void htgs::rasterization::oit_blend::backward(
             per_primitive_buffers.rgba,
             per_pixel_buffers.grad_info,
             grad_image,
+            grad_alpha,
+            alpha,
             grad_positions,
             grad_opacities,
             grad_sh_0,
@@ -85,16 +91,19 @@ void htgs::rasterization::oit_blend::backward(
 
     }, buffer_variant);
 
-    kernels::backward::preprocess_cu<<<div_round_up(n_primitives, config::block_size_preprocess), config::block_size_preprocess>>>(
+    const auto preprocess = use_aaa_mode ? kernels::backward::preprocess_cu<true> : kernels::backward::preprocess_cu<false>;
+    preprocess<<<div_round_up(n_primitives, config::block_size_preprocess), config::block_size_preprocess>>>(
         positions,
         scales,
         rotations,
+        opacities,
         sh_rest,
         per_primitive_buffers.n_touched_tiles,
         per_primitive_buffers.rgb_clamp_info,
         grad_VPMT,
         densification_info_helper,
         grad_positions,
+        grad_opacities,
         grad_scales,
         grad_rotations,
         grad_sh_0,
@@ -103,6 +112,7 @@ void htgs::rasterization::oit_blend::backward(
         n_primitives,
         active_sh_bases,
         total_sh_bases,
+        max_focal,
         use_distance_scaling
     );
     CHECK_CUDA(config::debug_backward, "preprocess_backward")

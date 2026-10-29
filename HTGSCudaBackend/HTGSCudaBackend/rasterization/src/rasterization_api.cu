@@ -34,7 +34,7 @@ enum class RasterizerMode {
     OIT_BLEND = 3,
 };
 
-std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int, int>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, int, int>
 htgs::rasterization::forward_wrapper(
     const torch::Tensor& positions,
     const torch::Tensor& scales,
@@ -50,9 +50,14 @@ htgs::rasterization::forward_wrapper(
     const int active_sh_bases,
     const int width,
     const int height,
+    const float focal_x,
+    const float focal_y,
+    const float center_x,
+    const float center_y,
     const float near_plane,
     const float far_plane,
-    const float scale_modifier)
+    const float scale_modifier,
+    const bool use_aaa_mode)
 {
     const RasterizerMode mode = static_cast<RasterizerMode>(rasterizer_mode);
     const int n_primitives = positions.size(0);
@@ -60,6 +65,7 @@ htgs::rasterization::forward_wrapper(
     const torch::TensorOptions float_options = torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA);
     const torch::TensorOptions byte_options = torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA);
     torch::Tensor image = torch::empty({3, height, width}, float_options);
+    torch::Tensor alpha = torch::empty({height, width}, float_options);
     torch::Tensor per_primitive_buffers = torch::empty({0}, byte_options);
     torch::Tensor per_tile_buffers = torch::empty({0}, byte_options);
     torch::Tensor per_instance_buffers = torch::empty({0}, byte_options);
@@ -87,14 +93,20 @@ htgs::rasterization::forward_wrapper(
                 reinterpret_cast<float4*>(VPM.contiguous().data_ptr<float>()),
                 reinterpret_cast<float3*>(cam_position.contiguous().data_ptr<float>()),
                 image.data_ptr<float>(),
+                alpha.data_ptr<float>(),
                 K,
                 n_primitives,
                 active_sh_bases,
                 total_sh_bases,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
-                far_plane);
+                far_plane,
+                use_aaa_mode);
             break;
         case RasterizerMode::ALPHA_BLEND_FIRST_K:
             buffer_state = alpha_blend_first_k::forward(
@@ -112,14 +124,20 @@ htgs::rasterization::forward_wrapper(
                 reinterpret_cast<float4*>(VPM.contiguous().data_ptr<float>()),
                 reinterpret_cast<float3*>(cam_position.contiguous().data_ptr<float>()),
                 image.data_ptr<float>(),
+                alpha.data_ptr<float>(),
                 K,
                 n_primitives,
                 active_sh_bases,
                 total_sh_bases,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
-                far_plane);
+                far_plane,
+                use_aaa_mode);
             break;
         case RasterizerMode::ALPHA_BLEND_GLOBAL_ORDERING:
             buffer_state = alpha_blend_global_ordering::forward(
@@ -136,13 +154,19 @@ htgs::rasterization::forward_wrapper(
                 reinterpret_cast<float4*>(VPM.contiguous().data_ptr<float>()),
                 reinterpret_cast<float3*>(cam_position.contiguous().data_ptr<float>()),
                 image.data_ptr<float>(),
+                alpha.data_ptr<float>(),
                 n_primitives,
                 active_sh_bases,
                 total_sh_bases,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
-                far_plane);
+                far_plane,
+                use_aaa_mode);
             break;
         case RasterizerMode::OIT_BLEND:
             buffer_state = oit_blend::forward(
@@ -160,26 +184,34 @@ htgs::rasterization::forward_wrapper(
                 reinterpret_cast<float4*>(VPM.contiguous().data_ptr<float>()),
                 reinterpret_cast<float3*>(cam_position.contiguous().data_ptr<float>()),
                 image.data_ptr<float>(),
+                alpha.data_ptr<float>(),
                 n_primitives,
                 active_sh_bases,
                 total_sh_bases,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
-                far_plane);
+                far_plane,
+                use_aaa_mode);
             break;
         default:
             throw std::runtime_error("unsupported rasterizer mode");
     }
 
-    return {image, per_primitive_buffers, per_tile_buffers, per_instance_buffers, per_pixel_buffers, buffer_state.first, buffer_state.second};
+    return {image, alpha, per_primitive_buffers, per_tile_buffers, per_instance_buffers, per_pixel_buffers, buffer_state.first, buffer_state.second};
 }
 
 std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor>
 htgs::rasterization::backward_wrapper(
     torch::Tensor& densification_info,
     const torch::Tensor& grad_image,
+    const torch::Tensor& grad_alpha,
     const torch::Tensor& image,
+    const torch::Tensor& alpha,
     const torch::Tensor& positions,
     const torch::Tensor& scales,
     const torch::Tensor& rotations,
@@ -197,9 +229,14 @@ htgs::rasterization::backward_wrapper(
     const int active_sh_bases,
     const int width,
     const int height,
+    const float focal_x,
+    const float focal_y,
+    const float center_x,
+    const float center_y,
     const float near_plane,
     const float far_plane,
     const float scale_modifier,
+    const bool use_aaa_mode,
     const int n_instances,
     const int instance_primitive_indices_selector,
     const bool use_distance_scaling)
@@ -226,12 +263,14 @@ htgs::rasterization::backward_wrapper(
         case RasterizerMode::HYBRID_BLEND:
             hybrid_blend::backward(
                 grad_image.contiguous().data_ptr<float>(),
+                grad_alpha.contiguous().data_ptr<float>(),
+                alpha.contiguous().data_ptr<float>(),
                 reinterpret_cast<float3*>(positions.contiguous().data_ptr<float>()),
                 reinterpret_cast<float3*>(scales.contiguous().data_ptr<float>()),
                 reinterpret_cast<float4*>(rotations.contiguous().data_ptr<float>()),
                 opacities.contiguous().data_ptr<float>(),
                 reinterpret_cast<float3*>(sh_rest.contiguous().data_ptr<float>()),
-                use_distance_scaling ? reinterpret_cast<float4*>(M.contiguous().data_ptr<float>()) : nullptr,
+                reinterpret_cast<float4*>(M.contiguous().data_ptr<float>()),
                 reinterpret_cast<float4*>(VPM.contiguous().data_ptr<float>()),
                 reinterpret_cast<float3*>(cam_position.contiguous().data_ptr<float>()),
                 reinterpret_cast<char*>(per_primitive_buffers.data_ptr()),
@@ -255,17 +294,21 @@ htgs::rasterization::backward_wrapper(
                 height,
                 n_instances,
                 instance_primitive_indices_selector,
+                max(focal_x, focal_y),
+                use_aaa_mode,
                 use_distance_scaling);
             break;
         case RasterizerMode::ALPHA_BLEND_FIRST_K:
             alpha_blend_first_k::backward(
                 grad_image.contiguous().data_ptr<float>(),
+                grad_alpha.contiguous().data_ptr<float>(),
+                alpha.contiguous().data_ptr<float>(),
                 reinterpret_cast<float3*>(positions.contiguous().data_ptr<float>()),
                 reinterpret_cast<float3*>(scales.contiguous().data_ptr<float>()),
                 reinterpret_cast<float4*>(rotations.contiguous().data_ptr<float>()),
                 opacities.contiguous().data_ptr<float>(),
                 reinterpret_cast<float3*>(sh_rest.contiguous().data_ptr<float>()),
-                use_distance_scaling ? reinterpret_cast<float4*>(M.contiguous().data_ptr<float>()) : nullptr,
+                reinterpret_cast<float4*>(M.contiguous().data_ptr<float>()),
                 reinterpret_cast<float4*>(VPM.contiguous().data_ptr<float>()),
                 reinterpret_cast<float3*>(cam_position.contiguous().data_ptr<float>()),
                 reinterpret_cast<char*>(per_primitive_buffers.data_ptr()),
@@ -288,18 +331,22 @@ htgs::rasterization::backward_wrapper(
                 height,
                 n_instances,
                 instance_primitive_indices_selector,
+                max(focal_x, focal_y),
+                use_aaa_mode,
                 use_distance_scaling);
             break;
         case RasterizerMode::ALPHA_BLEND_GLOBAL_ORDERING:
             alpha_blend_global_ordering::backward(
                 grad_image.contiguous().data_ptr<float>(),
+                grad_alpha.contiguous().data_ptr<float>(),
                 image.contiguous().data_ptr<float>(),
+                alpha.contiguous().data_ptr<float>(),
                 reinterpret_cast<float3*>(positions.contiguous().data_ptr<float>()),
                 reinterpret_cast<float3*>(scales.contiguous().data_ptr<float>()),
                 reinterpret_cast<float4*>(rotations.contiguous().data_ptr<float>()),
                 opacities.contiguous().data_ptr<float>(),
                 reinterpret_cast<float3*>(sh_rest.contiguous().data_ptr<float>()),
-                use_distance_scaling ? reinterpret_cast<float4*>(M.contiguous().data_ptr<float>()) : nullptr,
+                reinterpret_cast<float4*>(M.contiguous().data_ptr<float>()),
                 reinterpret_cast<float4*>(VPM.contiguous().data_ptr<float>()),
                 reinterpret_cast<float3*>(cam_position.contiguous().data_ptr<float>()),
                 reinterpret_cast<char*>(per_primitive_buffers.data_ptr()),
@@ -320,17 +367,21 @@ htgs::rasterization::backward_wrapper(
                 height,
                 n_instances,
                 instance_primitive_indices_selector,
+                max(focal_x, focal_y),
+                use_aaa_mode,
                 use_distance_scaling);
             break;
         case RasterizerMode::OIT_BLEND:
             oit_blend::backward(
                 grad_image.contiguous().data_ptr<float>(),
+                grad_alpha.contiguous().data_ptr<float>(),
+                alpha.contiguous().data_ptr<float>(),
                 reinterpret_cast<float3*>(positions.contiguous().data_ptr<float>()),
                 reinterpret_cast<float3*>(scales.contiguous().data_ptr<float>()),
                 reinterpret_cast<float4*>(rotations.contiguous().data_ptr<float>()),
                 opacities.contiguous().data_ptr<float>(),
                 reinterpret_cast<float3*>(sh_rest.contiguous().data_ptr<float>()),
-                use_distance_scaling ? reinterpret_cast<float4*>(M.contiguous().data_ptr<float>()) : nullptr,
+                reinterpret_cast<float4*>(M.contiguous().data_ptr<float>()),
                 reinterpret_cast<float4*>(VPM.contiguous().data_ptr<float>()),
                 reinterpret_cast<float3*>(cam_position.contiguous().data_ptr<float>()),
                 reinterpret_cast<char*>(per_primitive_buffers.data_ptr()),
@@ -353,6 +404,8 @@ htgs::rasterization::backward_wrapper(
                 height,
                 n_instances,
                 instance_primitive_indices_selector,
+                max(focal_x, focal_y),
+                use_aaa_mode,
                 use_distance_scaling);
             break;
         default:
@@ -362,7 +415,7 @@ htgs::rasterization::backward_wrapper(
     return {grad_positions, grad_scales, grad_rotations, grad_opacities, grad_sh_0, grad_sh_rest};
 }
 
-std::tuple<torch::Tensor, torch::Tensor>
+std::tuple<torch::Tensor, torch::Tensor, torch::Tensor>
 htgs::rasterization::inference_wrapper(
     const torch::Tensor& positions,
     const torch::Tensor& scales,
@@ -378,9 +431,14 @@ htgs::rasterization::inference_wrapper(
     const int active_sh_bases,
     const int width,
     const int height,
+    const float focal_x,
+    const float focal_y,
+    const float center_x,
+    const float center_y,
     const float near_plane,
     const float far_plane,
     const float scale_modifier,
+    const bool use_aaa_mode,
     const bool to_chw,
     const bool use_median_depth)
 {
@@ -391,6 +449,7 @@ htgs::rasterization::inference_wrapper(
     const torch::TensorOptions byte_options = torch::TensorOptions().dtype(torch::kByte).device(torch::kCUDA);
     torch::Tensor image = to_chw ? torch::empty({3, height, width}, float_options) : torch::empty({height, width, 3}, float_options);
     torch::Tensor depth = torch::empty({height, width}, float_options);
+    torch::Tensor alpha = torch::empty({height, width}, float_options);
     torch::Tensor per_primitive_buffers = torch::empty({0}, byte_options);
     torch::Tensor per_tile_buffers = torch::empty({0}, byte_options);
     torch::Tensor per_instance_buffers = torch::empty({0}, byte_options);
@@ -415,15 +474,21 @@ htgs::rasterization::inference_wrapper(
                 reinterpret_cast<const float3*>(cam_position.contiguous().data_ptr<float>()),
                 image.data_ptr<float>(),
                 depth.data_ptr<float>(),
+                alpha.data_ptr<float>(),
                 K,
                 n_primitives,
                 active_sh_bases,
                 total_sh_bases,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
                 far_plane,
                 scale_modifier,
+                use_aaa_mode,
                 to_chw,
                 use_median_depth);
             break;
@@ -443,15 +508,21 @@ htgs::rasterization::inference_wrapper(
                 reinterpret_cast<const float3*>(cam_position.contiguous().data_ptr<float>()),
                 image.data_ptr<float>(),
                 depth.data_ptr<float>(),
+                alpha.data_ptr<float>(),
                 K,
                 n_primitives,
                 active_sh_bases,
                 total_sh_bases,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
                 far_plane,
                 scale_modifier,
+                use_aaa_mode,
                 to_chw,
                 use_median_depth);
             break;
@@ -471,14 +542,20 @@ htgs::rasterization::inference_wrapper(
                 reinterpret_cast<const float3*>(cam_position.contiguous().data_ptr<float>()),
                 image.data_ptr<float>(),
                 depth.data_ptr<float>(),
+                alpha.data_ptr<float>(),
                 n_primitives,
                 active_sh_bases,
                 total_sh_bases,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
                 far_plane,
                 scale_modifier,
+                use_aaa_mode,
                 to_chw,
                 use_median_depth);
             break;
@@ -498,21 +575,27 @@ htgs::rasterization::inference_wrapper(
                 reinterpret_cast<const float3*>(cam_position.contiguous().data_ptr<float>()),
                 image.data_ptr<float>(),
                 depth.data_ptr<float>(),
+                alpha.data_ptr<float>(),
                 n_primitives,
                 active_sh_bases,
                 total_sh_bases,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
                 far_plane,
                 scale_modifier,
+                use_aaa_mode,
                 to_chw);
             break;
         default:
             throw std::runtime_error("unsupported rasterizer mode");
     }
     
-    return {image, depth};
+    return {image, depth, alpha};
 }
 
 void
@@ -530,9 +613,14 @@ htgs::rasterization::update_max_weights_wrapper(
     const int active_sh_bases,
     const int width,
     const int height,
+    const float focal_x,
+    const float focal_y,
+    const float center_x,
+    const float center_y,
     const float near_plane,
     const float far_plane,
     const float scale_modifier,
+    const bool use_aaa_mode,
     const float weight_threshold)
 {
     const RasterizerMode mode = static_cast<RasterizerMode>(rasterizer_mode);
@@ -557,14 +645,20 @@ htgs::rasterization::update_max_weights_wrapper(
                 opacities.contiguous().data_ptr<float>(),
                 reinterpret_cast<const float4*>(M.contiguous().data_ptr<float>()),
                 reinterpret_cast<const float4*>(VPM.contiguous().data_ptr<float>()),
+                reinterpret_cast<const float3*>(cam_position.contiguous().data_ptr<float>()),
                 max_weights.data_ptr<float>(),
                 K,
                 n_primitives,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
                 far_plane,
-                weight_threshold);
+                weight_threshold,
+                use_aaa_mode);
             break;
         case RasterizerMode::ALPHA_BLEND_FIRST_K:
             alpha_blend_first_k::update_max_weights(
@@ -577,14 +671,20 @@ htgs::rasterization::update_max_weights_wrapper(
                 opacities.contiguous().data_ptr<float>(),
                 reinterpret_cast<const float4*>(M.contiguous().data_ptr<float>()),
                 reinterpret_cast<const float4*>(VPM.contiguous().data_ptr<float>()),
+                reinterpret_cast<const float3*>(cam_position.contiguous().data_ptr<float>()),
                 max_weights.data_ptr<float>(),
                 K,
                 n_primitives,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
                 far_plane,
-                weight_threshold);
+                weight_threshold,
+                use_aaa_mode);
             break;
         case RasterizerMode::ALPHA_BLEND_GLOBAL_ORDERING:
             alpha_blend_global_ordering::update_max_weights(
@@ -597,13 +697,19 @@ htgs::rasterization::update_max_weights_wrapper(
                 opacities.contiguous().data_ptr<float>(),
                 reinterpret_cast<const float4*>(M.contiguous().data_ptr<float>()),
                 reinterpret_cast<const float4*>(VPM.contiguous().data_ptr<float>()),
+                reinterpret_cast<const float3*>(cam_position.contiguous().data_ptr<float>()),
                 max_weights.data_ptr<float>(),
                 n_primitives,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
                 far_plane,
-                weight_threshold);
+                weight_threshold,
+                use_aaa_mode);
             break;
         case RasterizerMode::OIT_BLEND:
             oit_blend::update_max_weights(
@@ -616,13 +722,19 @@ htgs::rasterization::update_max_weights_wrapper(
                 opacities.contiguous().data_ptr<float>(),
                 reinterpret_cast<const float4*>(M.contiguous().data_ptr<float>()),
                 reinterpret_cast<const float4*>(VPM.contiguous().data_ptr<float>()),
+                reinterpret_cast<const float3*>(cam_position.contiguous().data_ptr<float>()),
                 max_weights.data_ptr<float>(),
                 n_primitives,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
                 far_plane,
-                weight_threshold);
+                weight_threshold,
+                use_aaa_mode);
             break;
         default:
             throw std::runtime_error("unsupported rasterizer mode");

@@ -4,12 +4,13 @@ import torch
 
 import Framework
 from Datasets.Base import BaseDataset
-from Datasets.utils import BasicPointCloud
+from Datasets.utils import BasicPointCloud, apply_background_color
 from Logging import Logger
 from Methods.Base.GuiTrainer import GuiTrainer
 from Methods.Base.utils import pre_training_callback, training_callback, post_training_callback
 from Methods.HTGS.Loss import HTGSLoss
 from Optim.Samplers.DatasetSamplers import DatasetSampler
+from Optim.segmentation_utils import compute_segmentation_masks
 
 
 @Framework.Configurable.configure(
@@ -21,6 +22,9 @@ from Optim.Samplers.DatasetSamplers import DatasetSampler
     LEARNING_RATE_OPACITY=0.05,
     LEARNING_RATE_SCALING=0.005,
     LEARNING_RATE_ROTATION=0.001,
+    LEARNING_RATE_BACKGROUND_INIT=0.1,
+    LEARNING_RATE_BACKGROUND_FINAL=0.001,
+    LEARNING_RATE_BACKGROUND_MAX_STEPS=10_000,
     PERCENT_DENSE=0.01,
     USE_3D_FILTER=True,
     USE_OPACITY_RESET=False,
@@ -29,15 +33,19 @@ from Optim.Samplers.DatasetSamplers import DatasetSampler
     USE_VISIBILITY_PRUNING=True,
     VISIBILITY_PRUNING_THRESHOLD=0.01,
     USE_DISTANCE_SCALING=True,
+    USE_RANDOM_DISCARDED_BACKGROUND_COLOR=True,
     OPACITY_RESET_INTERVAL=3_000,
     OPACITY_THRESHOLD=0.005,
     DENSIFY_START_ITERATION=500,
     DENSIFY_END_ITERATION=15_000,
     DENSIFICATION_INTERVAL=100,
     DENSIFY_GRAD_THRESHOLD=0.0002,
+    SKY_MASK_SCALE_FACTOR=1.0,
     LOSS=Framework.ConfigParameterList(
         LAMBDA_L1=0.8,
         LAMBDA_DSSIM=0.2,
+        LAMBDA_BCE=0.001,
+        LAMBDA_BG_SEPARATION=0.01,
     ),
 )
 class HTGSTrainer(GuiTrainer):
@@ -47,6 +55,18 @@ class HTGSTrainer(GuiTrainer):
         super(HTGSTrainer, self).__init__(**kwargs)
         self.train_sampler = None
         self.loss = HTGSLoss(loss_config=self.LOSS)
+        self.optimizer = None
+        self.scheduler = None
+
+    @pre_training_callback(priority=5001)
+    @torch.no_grad()
+    def compute_sky_masks(self, _, dataset: 'BaseDataset') -> None:
+        """Computes sky segmentation masks for the training views."""
+        if self.LOSS.LAMBDA_BG_SEPARATION > 0.0:
+            compute_segmentation_masks(
+                dataset.train(), self.model.output_directory / 'sky_masks', label='sky', scale_factor=self.SKY_MASK_SCALE_FACTOR,
+                model='SegFormer',
+            )
 
     @pre_training_callback(priority=50)
     @torch.no_grad()
@@ -58,9 +78,6 @@ class HTGSTrainer(GuiTrainer):
     @torch.no_grad()
     def setup_gaussians(self, _, dataset: 'BaseDataset') -> None:
         """Sets up the model."""
-        # check background color
-        if (dataset.default_camera.background_color != 0.0).any():
-            raise Framework.TrainingError('HTGS currently only supports black background')
         dataset.train()
         camera_centers = torch.stack([view.position for view in dataset])
         radius = (1.1 * torch.max(torch.linalg.norm(camera_centers - torch.mean(camera_centers, dim=0), dim=1))).item()
@@ -78,11 +95,19 @@ class HTGSTrainer(GuiTrainer):
         if self.USE_3D_FILTER:
             self.model.gaussians.setup_3d_filter(dataset)
 
+        if self.model.background_model is not None:
+            self.model.background_model.training_setup(self)
+            param_groups, schedulers = self.model.get_optimizer_param_groups(self.NUM_ITERATIONS)
+            self.optimizer = torch.optim.AdamW(param_groups, lr=1.0, betas=(0.9, 0.99), eps=1.0e-15, weight_decay=0.0)
+            self.scheduler = torch.optim.lr_scheduler.LambdaLR(self.optimizer, schedulers)
+
     @training_callback(priority=110, start_iteration=1000, iteration_stride=1000)
     @torch.no_grad()
     def increase_sh_degree(self, *_) -> None:
         """Increase the number of used SH coefficients up to a maximum degree."""
         self.model.gaussians.increase_used_sh_degree()
+        if self.model.background_model is not None:
+            self.model.background_model.increase_used_sh_degree()
 
     @training_callback(active='USE_VISIBILITY_PRUNING', priority=105, start_iteration=15000, iteration_stride=1000)
     @torch.no_grad()
@@ -104,17 +129,20 @@ class HTGSTrainer(GuiTrainer):
         # get random view
         view = self.train_sampler.get(dataset=dataset)['view']
         # render
-        image = self.renderer.render_image_training(
+        use_discard_color = self.USE_RANDOM_DISCARDED_BACKGROUND_COLOR and self.model.background_model is not None and self.model.BACKGROUND_DISCARD_BELOW is not None
+        discard_color = torch.rand_like(view.camera.background_color) if use_discard_color else None
+        image, alpha = self.renderer.render_image_training(
             view=view,
             update_densification_info=iteration <= self.DENSIFY_END_ITERATION,
             use_distance_scaling=self.USE_DISTANCE_SCALING,
+            discard_color=discard_color,
         )
         # calculate loss
         # compose gt with background color if needed  # FIXME: integrate into data model
         rgb_gt = view.rgb
         if (alpha_gt := view.alpha) is not None:
-            rgb_gt = rgb_gt * alpha_gt  # htgs only supports black background
-        loss = self.loss(image, rgb_gt)
+            rgb_gt = apply_background_color(rgb_gt, alpha_gt, view.camera.background_color)
+        loss = self.loss(image, rgb_gt, alpha, view.segmentation)
         loss.backward()
 
     @training_callback(priority=90, start_iteration='DENSIFY_START_ITERATION', end_iteration='DENSIFY_END_ITERATION', iteration_stride='DENSIFICATION_INTERVAL')
@@ -157,6 +185,10 @@ class HTGSTrainer(GuiTrainer):
         """Update parameters."""
         self.model.gaussians.optimizer.step()
         self.model.gaussians.optimizer.zero_grad()
+        if self.optimizer is not None:
+            self.optimizer.step()
+            self.optimizer.zero_grad()
+            self.scheduler.step()
 
     @training_callback(active='WANDB.ACTIVATE', priority=10, iteration_stride='WANDB.INTERVAL')
     @torch.no_grad()

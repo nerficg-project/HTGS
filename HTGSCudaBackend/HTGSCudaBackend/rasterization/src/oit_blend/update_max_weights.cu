@@ -21,25 +21,33 @@ void htgs::rasterization::oit_blend::update_max_weights(
     const float* opacities,
     const float4* M,
     const float4* VPM,
+    const float3* cam_position,
     float* max_weights,
     const int n_primitives,
     const int width,
     const int height,
+    const float focal_x,
+    const float focal_y,
+    const float center_x,
+    const float center_y,
     const float near_plane,
     const float far_plane,
-    const float weight_threshold)
+    const float weight_threshold,
+    const bool use_aaa_mode)
 {
-    cudaMemcpyToSymbol(c_M3, M + 2, sizeof(float4), 0, cudaMemcpyDeviceToDevice);
+    cudaMemcpyToSymbol(c_M, M, 3 * sizeof(float4), 0, cudaMemcpyDeviceToDevice);
     cudaMemcpyToSymbol(c_VPM, VPM, 4 * sizeof(float4), 0, cudaMemcpyDeviceToDevice);
-    
+    cudaMemcpyToSymbol(c_cam_position, cam_position, sizeof(float3), 0, cudaMemcpyDeviceToDevice);
+
     const dim3 grid(div_round_up(width, config::tile_width), div_round_up(height, config::tile_height), 1);
     const dim3 block(config::tile_width, config::tile_height, 1);
     const int n_tiles = grid.x * grid.y;
     const int end_bit = extract_end_bit(n_tiles - 1);
     
     constexpr bool store_MT3 = false, store_rgb = false, store_rgb_clamp_info = false;
-    char* per_primitive_buffers_blob = per_primitive_buffers_func(required<PerPrimitiveBuffers>(n_primitives, store_MT3, store_rgb, store_rgb_clamp_info));
-    PerPrimitiveBuffers per_primitive_buffers = PerPrimitiveBuffers::from_blob(per_primitive_buffers_blob, n_primitives, store_MT3, store_rgb, store_rgb_clamp_info);
+    const bool store_opacity = use_aaa_mode; // this pass stores no color, so the dilated opacity has no alpha channel to ride in
+    char* per_primitive_buffers_blob = per_primitive_buffers_func(required<PerPrimitiveBuffers>(n_primitives, store_MT3, store_rgb, store_rgb_clamp_info, store_opacity));
+    PerPrimitiveBuffers per_primitive_buffers = PerPrimitiveBuffers::from_blob(per_primitive_buffers_blob, n_primitives, store_MT3, store_rgb, store_rgb_clamp_info, store_opacity);
 
     char* per_tile_buffers_blob = per_tile_buffers_func(required<PerTileBuffers>(n_tiles));
     PerTileBuffers per_tile_buffers = PerTileBuffers::from_blob(per_tile_buffers_blob, n_tiles);
@@ -52,7 +60,8 @@ void htgs::rasterization::oit_blend::update_max_weights(
     }
     cudaMemsetAsync(per_tile_buffers.instance_ranges, 0, sizeof(uint2) * n_tiles, memset_stream);
 
-    kernels::update_max_weights::preprocess_cu<<<div_round_up(n_primitives, config::block_size_preprocess), config::block_size_preprocess>>>(
+    const auto preprocess = use_aaa_mode ? kernels::update_max_weights::preprocess_cu<true> : kernels::update_max_weights::preprocess_cu<false>;
+    preprocess<<<div_round_up(n_primitives, config::block_size_preprocess), config::block_size_preprocess>>>(
         positions,
         scales,
         rotations,
@@ -62,9 +71,16 @@ void htgs::rasterization::oit_blend::update_max_weights(
         per_primitive_buffers.VPMT1,
         per_primitive_buffers.VPMT2,
         per_primitive_buffers.VPMT4,
+        per_primitive_buffers.opacity,
         n_primitives,
         grid.x,
         grid.y,
+        static_cast<float>(width),
+        static_cast<float>(height),
+        focal_x,
+        focal_y,
+        center_x,
+        center_y,
         near_plane,
         far_plane
     );
@@ -129,7 +145,7 @@ void htgs::rasterization::oit_blend::update_max_weights(
         kernels::update_max_weights::update_max_weights_cu<<<grid, block>>>(
             per_tile_buffers.instance_ranges,
             per_instance_buffers.primitive_indices.Current(),
-            opacities,
+            use_aaa_mode ? per_primitive_buffers.opacity : opacities,
             per_primitive_buffers.VPMT1,
             per_primitive_buffers.VPMT2,
             per_primitive_buffers.VPMT4,

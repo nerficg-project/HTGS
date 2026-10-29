@@ -2,11 +2,13 @@
 
 #include "helper_math.h"
 #include "kernel_utils.cuh"
+#include "kernel_utils_aaa.cuh"
 #include "alpha_blend_first_k/config.h"
 #include <cooperative_groups.h>
 
 namespace htgs::rasterization::alpha_blend_first_k::kernels::inference {
 
+    template<bool aaa_mode>
     __global__ void preprocess_cu(
         const float3* positions,
         const float3* scales,
@@ -20,12 +22,19 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::inference {
         float4* primitive_VPMT2,
         float4* primitive_VPMT4,
         float4* primitive_MT3,
+        float* primitive_opacity,
         float3* primitive_rgb,
         const uint n_primitives,
         const uint grid_width,
         const uint grid_height,
         const uint active_sh_bases,
         const uint total_sh_bases,
+        const float width,
+        const float height,
+        const float focal_x,
+        const float focal_y,
+        const float center_x,
+        const float center_y,
         const float near_plane,
         const float far_plane,
         const float scale_modifier)
@@ -37,28 +46,57 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::inference {
 
         // transform and cull
         const float3 position_world = positions[primitive_idx];
-        const float opacity = opacities[primitive_idx];
-        const float4 M3 = c_M3;
-        uint n_touched_tiles;
-        uint4 screen_bounds;
-        float3 u, v, w;
-        float4 VPMT1, VPMT2, VPMT4;
-        float z;
-        if (transform_and_cull(
-            scales, rotations,
-            position_world, opacity, M3,
-            n_touched_tiles, screen_bounds, u, v, w, VPMT1, VPMT2, VPMT4, z,
-            primitive_idx, grid_width, grid_height, config::tile_width, config::tile_height,
-            near_plane, far_plane, config::min_alpha_threshold_rcp, scale_modifier
-        )) return;
+        if constexpr (aaa_mode) {
+            float opacity = opacities[primitive_idx];
+            uint n_touched_tiles;
+            uint4 screen_bounds;
+            float3 u, v, w;
+            float4 VPMT1, VPMT2, VPMT4, MT3;
 
-        // write intermediate results
-        primitive_n_touched_tiles[primitive_idx] = n_touched_tiles;
-        primitive_screen_bounds[primitive_idx] = screen_bounds;
-        primitive_VPMT1[primitive_idx] = VPMT1;
-        primitive_VPMT2[primitive_idx] = VPMT2;
-        primitive_VPMT4[primitive_idx] = VPMT4;
-        primitive_MT3[primitive_idx] = make_float4(dot(make_float3(M3), u), dot(make_float3(M3), v), dot(make_float3(M3), w), z);
+            // improved transform and cull
+            const bool culled = transform_and_cull_aaa(
+                scales, rotations,
+                position_world,
+                n_touched_tiles, screen_bounds, u, v, w, VPMT1, VPMT2, VPMT4, MT3, opacity,
+                primitive_idx, grid_width, grid_height, config::tile_width, config::tile_height,
+                width, height, focal_x, focal_y, center_x, center_y,
+                config::aa_kernel_size, config::min_alpha_threshold, config::min_alpha_threshold_rcp, scale_modifier
+            );
+            __syncwarp();
+            if (culled) return;
+
+            // write intermediate results
+            primitive_n_touched_tiles[primitive_idx] = n_touched_tiles;
+            primitive_screen_bounds[primitive_idx] = screen_bounds;
+            primitive_VPMT1[primitive_idx] = VPMT1;
+            primitive_VPMT2[primitive_idx] = VPMT2;
+            primitive_VPMT4[primitive_idx] = VPMT4;
+            primitive_MT3[primitive_idx] = MT3;
+            primitive_opacity[primitive_idx] = opacity;
+        } else {
+            const float opacity = opacities[primitive_idx];
+            const float4 M3 = c_M[2];
+            uint n_touched_tiles;
+            uint4 screen_bounds;
+            float3 u, v, w;
+            float4 VPMT1, VPMT2, VPMT4;
+            float z;
+            if (transform_and_cull(
+                scales, rotations,
+                position_world, opacity, M3,
+                n_touched_tiles, screen_bounds, u, v, w, VPMT1, VPMT2, VPMT4, z,
+                primitive_idx, grid_width, grid_height, config::tile_width, config::tile_height,
+                near_plane, far_plane, config::min_alpha_threshold_rcp, scale_modifier
+            )) return;
+
+            // write intermediate results
+            primitive_n_touched_tiles[primitive_idx] = n_touched_tiles;
+            primitive_screen_bounds[primitive_idx] = screen_bounds;
+            primitive_VPMT1[primitive_idx] = VPMT1;
+            primitive_VPMT2[primitive_idx] = VPMT2;
+            primitive_VPMT4[primitive_idx] = VPMT4;
+            primitive_MT3[primitive_idx] = make_float4(dot(make_float3(M3), u), dot(make_float3(M3), v), dot(make_float3(M3), w), z);
+        }
 
         // compute view-dependent color
         const float3 rgb = convert_sh_to_rgb<false>(
@@ -87,6 +125,7 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::inference {
         const float3* primitive_rgb,
         float* image,
         float* depths,
+        float* alphas,
         const uint width,
         const uint height,
         const uint grid_width,
@@ -186,7 +225,8 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::inference {
 
                 transmittance *= 1.0f - alpha;
             }
-            if (!use_median_depth) depth_pixel = (transmittance < 1.0f) ? depth_pixel / (1.0f - transmittance) : 0.0f;
+            const float alpha_pixel = 1.0f - transmittance;
+            if (!use_median_depth) depth_pixel = (transmittance < 1.0f) ? depth_pixel / alpha_pixel : 0.0f;
             // store results
             const int pixel_idx = width * pixel_coords.y + pixel_coords.x;
             if (output_chw) {
@@ -202,6 +242,7 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::inference {
                 image[base_idx + 2] = __saturatef(rgb_pixel.z);
             }
             depths[pixel_idx] = depth_pixel;
+            alphas[pixel_idx] = transmittance < config::transmittance_threshold ? 1.0f : alpha_pixel;
         }
     }
 

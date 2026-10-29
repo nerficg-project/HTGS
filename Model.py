@@ -6,15 +6,238 @@ import numpy as np
 import Framework
 from Cameras.Perspective import PerspectiveCamera
 from Datasets.Base import BaseDataset
-from Datasets.utils import BasicPointCloud
-from Cameras.utils import quaternion_to_rotation_matrix
+from Datasets.utils import BasicPointCloud, View
+from Cameras.utils import quaternion_to_rotation_matrix, directions_to_equirectangular_grid_coords, \
+    equirectangular_grid_coords_to_directions
 from Logging import Logger
 from Methods.Base.Model import BaseModel
 from Optim.adam_utils import replace_param_group_data, prune_param_groups, extend_param_groups
 from Optim.lr_utils import LRDecayPolicy
 from Optim.knn_utils import compute_root_mean_squared_knn_distances
+import Thirdparty.TinyCudaNN as tcnn
 from CudaUtils.MortonEncoding import morton_encode
-from Methods.HTGS.HTGSCudaBackend import update_3d_filter
+from Methods.HTGS.HTGSCudaBackend import eval_envmap, update_3d_filter
+from Methods.HTGS.utils import compute_discard_mask
+
+
+class NeuralEnvironmentMap(torch.nn.Module):
+    """Environment map using spherical harmonics encoding and an MLP."""
+
+    def __init__(self, width: int = 2000, height: int = 1000) -> None:
+        """Initialize submodules. Width and height are relevant only for baking."""
+        super().__init__()
+        self.width = width
+        self.height = height
+        self._baked_texture = None
+        self.net_with_encoding = tcnn.NetworkWithInputEncoding(
+            n_input_dims=3,
+            n_output_dims=3,
+            encoding_config={
+                'otype': 'SphericalHarmonics',
+                'degree': 4
+            },
+            network_config={
+                'otype': 'FullyFusedMLP',
+                'activation': 'ReLU',
+                'output_activation': 'Sigmoid',
+                'n_neurons': 128,
+                # 'n_hidden_layers': 4,
+                'n_hidden_layers': 2,
+            },
+            seed=Framework.config.GLOBAL.RANDOM_SEED
+        )
+
+    def train(self, mode: bool = True) -> 'NeuralEnvironmentMap':
+        """Switches the module's mode, invalidating the baked texture as the weights may change."""
+        self._baked_texture = None
+        return super().train(mode)
+
+    def get_optimizer_param_groups(self, max_iterations: int) -> tuple[list[dict], list[LRDecayPolicy]]:
+        """Returns the parameter groups for the optimizer."""
+        param_groups = [{'params': self.net_with_encoding.parameters(), 'lr': 1.0}]
+        schedulers = [self.lr_decay_policy]
+        return param_groups, schedulers
+
+    def training_setup(self, training_wrapper) -> None:
+        self.lr_decay_policy = LRDecayPolicy(
+            lr_init=training_wrapper.LEARNING_RATE_BACKGROUND_INIT * 0.1,
+            lr_final=training_wrapper.LEARNING_RATE_BACKGROUND_FINAL * 0.1,
+            lr_delay_steps=0,
+            lr_delay_mult=1.0,
+            max_steps=training_wrapper.LEARNING_RATE_BACKGROUND_MAX_STEPS,
+        )
+
+    def increase_used_sh_degree(self) -> None:
+        """Increases the used SH degree."""
+        pass
+
+    @property
+    @torch.no_grad()
+    def get_baked_texture(self) -> torch.Tensor:
+        """Returns the MLP baked into an equirectangular texture, evaluated at the texel centers sampled by
+        EnvironmentMap. The values are post-activation, as the output activation is part of the network.
+        The result is cached until the module's mode is switched."""
+        if self._baked_texture is None:
+            # texel centers in grid coordinates, i.e. the align_corners=False convention used for sampling
+            u = torch.arange(self.width, dtype=torch.float32).add_(0.5).mul_(2.0 / self.width).sub_(1.0)
+            v = torch.arange(self.height, dtype=torch.float32).add_(0.5).mul_(2.0 / self.height).sub_(1.0)
+            grid_v, grid_u = torch.meshgrid(v, u, indexing='ij')
+            directions = equirectangular_grid_coords_to_directions(torch.stack([grid_u, grid_v], dim=-1).view(-1, 2))
+            directions.mul_(0.5).add_(0.5)  # for compatibility with the SH encoding in tiny-cuda-nn
+            self._baked_texture = self.net_with_encoding(directions).float().view(self.height, self.width, 3)\
+                .permute(2, 0, 1).contiguous()
+        return self._baked_texture
+
+    def forward(self, view: View, to_chw: bool) -> torch.Tensor:
+        """Returns environment map values for the given view."""
+        view_dirs_all = view.cam_to_world(view.camera.compute_local_ray_directions(), is_point=False)
+        view_dirs_all = torch.nn.functional.normalize(view_dirs_all, p=2, dim=-1)
+        view_dirs_all.mul_(0.5).add_(0.5)  # for compatibility with the SH encoding in tiny-cuda-nn
+        image = self.net_with_encoding(view_dirs_all).reshape(view.camera.height, view.camera.width, 3)
+        return image.permute(2, 0, 1) if to_chw else image
+
+
+class SHEnvironmentMap(torch.nn.Module):
+    """Environment map using spherical harmonics encoding. Uses fused CUDA evaluation for SH degrees <= 3, otherwise falls back to TCNN."""
+
+    def __init__(self, sh_degree: int, pretrained: bool = False, disable_coarse_to_fine: bool = False) -> None:
+        """Initialize submodules."""
+        super().__init__()
+        self.active_sh_degree = sh_degree if pretrained or disable_coarse_to_fine else 0
+        self.active_sh_bases = (self.active_sh_degree + 1) ** 2
+        self.max_sh_degree = sh_degree
+        if sh_degree > 3:
+            self.encoding = tcnn.Encoding(
+                n_input_dims=3,
+                encoding_config={
+                    'otype': 'SphericalHarmonics',
+                    'degree': sh_degree + 1,  # +1 because tcnn counts degrees differently
+                },
+                dtype=torch.float32,
+                seed=Framework.config.GLOBAL.RANDOM_SEED
+            )
+            self.register_parameter('coefficients', torch.nn.Parameter(torch.zeros((1, self.encoding.n_output_dims, 3), dtype=torch.float32)))
+        else:
+            self.encoding = None
+            self.register_parameter('coefficients', torch.nn.Parameter(torch.zeros((1, (sh_degree + 1) ** 2, 3), dtype=torch.float32)))
+
+        # TODO
+        #   - compare different output activations
+        #   - learning rate tuning
+        #   - fused implementation
+        #   - binary cross entropy loss tuning
+        # self.output_activation = torch.nn.Sigmoid()
+        # self.output_activation = lambda x: x.add(0.5).clamp(min=0.0, max=1.0)
+        self.output_activation = lambda x: torch.tanh(x) * 0.5 + 0.5
+
+    def training_setup(self, training_wrapper) -> None:
+        self.lr_decay_policy = LRDecayPolicy(
+            lr_init=training_wrapper.LEARNING_RATE_BACKGROUND_INIT,
+            lr_final=training_wrapper.LEARNING_RATE_BACKGROUND_FINAL,
+            lr_delay_steps=0,
+            lr_delay_mult=1.0,
+            max_steps=training_wrapper.LEARNING_RATE_BACKGROUND_MAX_STEPS,
+        )
+
+    def get_optimizer_param_groups(self, max_iterations: int) -> tuple[list[dict], list[LRDecayPolicy]]:
+        """Returns the parameter groups for the optimizer."""
+        param_groups = [{'params': self.parameters(), 'lr': 1.0}]
+        schedulers = [self.lr_decay_policy]
+        return param_groups, schedulers
+
+    def increase_used_sh_degree(self) -> None:
+        """Increases the used SH degree."""
+        if self.active_sh_degree < self.max_sh_degree:
+            self.active_sh_degree += 1
+            self.active_sh_bases = (self.active_sh_degree + 1) ** 2
+
+    @property
+    def get_sh_coefficients(self) -> torch.Tensor:
+        """Returns all SH coefficients as a (bases, 3) tensor. Coefficients of inactive degrees are zero."""
+        return self.coefficients[0]
+
+    def eval_sh(self, view_directions: torch.Tensor) -> torch.Tensor:
+        """Evaluates the SH coefficients for the given view directions."""
+        sh_values = self.encoding(view_directions)[:, :self.active_sh_bases, None]
+        coefficients = self.coefficients[:, :self.active_sh_bases]
+        return self.output_activation(sh_values.mul(coefficients).sum(dim=-2))
+
+    def forward(self, view: View, to_chw: bool) -> torch.Tensor:
+        """Returns environment map values for the given view."""
+        if self.max_sh_degree <= 3 and isinstance(view.camera, PerspectiveCamera):
+            return self.output_activation(eval_envmap(
+                sh_coefficients=self.coefficients.squeeze(0),
+                cam_rotation=view.rotation,
+                active_sh_bases=self.active_sh_bases,
+                width=view.camera.width,
+                height=view.camera.height,
+                focal_x=view.camera.focal_x,
+                focal_y=view.camera.focal_y,
+                center_x=view.camera.center_x,
+                center_y=view.camera.center_y,
+                to_chw=to_chw,
+            ))
+
+        view_dirs_all = view.cam_to_world(view.camera.compute_local_ray_directions(), is_point=False)
+        view_dirs_all = torch.nn.functional.normalize(view_dirs_all, p=2, dim=-1)
+        view_dirs_all.mul_(0.5).add_(0.5)  # for compatibility with the SH encoding in tiny-cuda-nn
+        image = self.eval_sh(view_dirs_all).reshape(view.camera.height, view.camera.width, 3)
+        return image.permute(2, 0, 1) if to_chw else image
+
+
+class EnvironmentMap(torch.nn.Module):
+    """Environment map."""
+
+    def __init__(self, width: int, height: int) -> None:
+        """Initialize submodules."""
+        super().__init__()
+        self.register_parameter('texture', torch.nn.Parameter(
+            torch.full((1, 3, height, width), fill_value=0.5, dtype=torch.float32)
+        ))
+
+    def training_setup(self, training_wrapper) -> None:
+        self.lr_decay_policy = LRDecayPolicy(
+            lr_init=training_wrapper.LEARNING_RATE_BACKGROUND_INIT * 0.1,
+            lr_final=training_wrapper.LEARNING_RATE_BACKGROUND_FINAL * 0.3,
+            lr_delay_steps=500,
+            lr_delay_mult=0.1,
+            max_steps=training_wrapper.LEARNING_RATE_BACKGROUND_MAX_STEPS,
+        )
+
+    def get_optimizer_param_groups(self, max_iterations: int) -> tuple[list[dict], list[LRDecayPolicy]]:
+        """Returns the parameter groups for the optimizer."""
+        param_groups = [{'params': self.parameters(), 'lr': 1.0}]
+        schedulers = [self.lr_decay_policy]
+        return param_groups, schedulers
+
+    def increase_used_sh_degree(self) -> None:
+        """Increases the used SH degree."""
+        pass
+
+    @property
+    def get_texture(self) -> torch.Tensor:
+        """Returns the raw texture, i.e. without the output activation applied."""
+        return self.texture[0]
+
+    @property
+    def get_baked_texture(self) -> torch.Tensor:
+        """Returns the pre-activated texture. Note that interpolating the activated texture != activating the
+        interpolated texture, so training behavior is not preserved!"""
+        return self.texture[0].sigmoid()
+
+    def forward(self, view: View, to_chw: bool) -> torch.Tensor:
+        """Returns environment map values for the given view."""
+        view_directions = view.cam_to_world(view.camera.compute_local_ray_directions(), is_point=False)
+        view_directions = torch.nn.functional.normalize(view_directions, p=2, dim=-1)
+        grid_coords = directions_to_equirectangular_grid_coords(view_directions)
+        image = torch.nn.functional.grid_sample(
+            input=self.texture,  # (1, 3, height, width)
+            grid=grid_coords.view(1, view.camera.height, view.camera.width, 2),
+            mode='bilinear',
+            padding_mode='border',
+            align_corners=False
+        ).squeeze().sigmoid()  # (3, height, width)
+        return image if to_chw else image.permute(1, 2, 0)
 
 
 class Gaussians(torch.nn.Module):
@@ -285,7 +508,8 @@ class Gaussians(torch.nn.Module):
         self._scales = optimizable_tensors['scales']
         self._rotations = optimizable_tensors['rotations']
 
-    def reset_densification_info(self):
+    def reset_densification_info(self) -> None:
+        """Resets the densification info buffers to zero."""
         n_points = self._positions.shape[0]
         n_floats = 3 if Gaussians.GOF_DENSIFICATION_GRAD else 2
         self.densification_info = torch.zeros((n_floats, n_points, 1), dtype=torch.float32, device='cuda')
@@ -437,6 +661,16 @@ class Gaussians(torch.nn.Module):
 
 @Framework.Configurable.configure(
     SH_DEGREE=3,
+    BACKGROUND_MODEL='SH',  # 'NONE', 'SH', 'MLP', or 'TEX'
+    BACKGROUND_DISCARD_BELOW=0.1,  # discard the background below this y component of the view direction, None to disable
+    SH_BACKGROUND_MODEL=Framework.ConfigParameterList(
+        DEGREE=3,
+        DISABLE_COARSE_TO_FINE=False,
+    ),
+    ENVIRONMENT_MAP=Framework.ConfigParameterList(
+        TEXTURE_WIDTH=2000,
+        TEXTURE_HEIGHT=1000,
+    ),
 )
 class HTGSModel(BaseModel):
     """Defines the HTGS model."""
@@ -444,12 +678,51 @@ class HTGSModel(BaseModel):
     def __init__(self, name: str = None) -> None:
         super().__init__(name)
         self.gaussians: Gaussians | None = None
+        self.background_model: SHEnvironmentMap | NeuralEnvironmentMap | EnvironmentMap | None = None
 
     def build(self) -> 'HTGSModel':
         """Builds the model."""
         pretrained = self.num_iterations_trained > 0
         self.gaussians = Gaussians(self.SH_DEGREE, pretrained)
+        match self.BACKGROUND_MODEL:
+            case 'NONE':
+                self.background_model = None
+            case 'SH':
+                self.background_model = SHEnvironmentMap(
+                    sh_degree=self.SH_BACKGROUND_MODEL.DEGREE,
+                    pretrained=pretrained,
+                    disable_coarse_to_fine=self.SH_BACKGROUND_MODEL.DISABLE_COARSE_TO_FINE,
+                )
+            case 'MLP':
+                self.background_model = NeuralEnvironmentMap(
+                    width=self.ENVIRONMENT_MAP.TEXTURE_WIDTH,
+                    height=self.ENVIRONMENT_MAP.TEXTURE_HEIGHT,
+                )
+            case 'TEX':
+                self.background_model = EnvironmentMap(
+                    width=self.ENVIRONMENT_MAP.TEXTURE_WIDTH,
+                    height=self.ENVIRONMENT_MAP.TEXTURE_HEIGHT,
+                )
+            case _:
+                raise Framework.ModelError(f'MODEL.BACKGROUND_MODEL must be one of NONE/SH/MLP/TEX, got {self.BACKGROUND_MODEL}')
         return self
+
+    def eval_background(self, view: View, to_chw: bool, discard_color: torch.Tensor | None = None) -> torch.Tensor:
+        """Evaluates the background model for the given view, discarding outputs below the
+        horizon defined by MODEL.BACKGROUND_COLOR_DISCORD_BELOW."""
+        background = self.background_model(view, to_chw)
+        if self.BACKGROUND_DISCARD_BELOW is None:
+            return background
+        discarded = compute_discard_mask(view, self.BACKGROUND_DISCARD_BELOW, to_chw)
+        if discard_color is None:
+            return background.masked_fill(discarded, 0.0)
+        return torch.where(discarded, discard_color[:, None, None] if to_chw else discard_color, background)
+
+    def get_optimizer_param_groups(self, n_iterations: int) -> tuple[list[dict], list[LRDecayPolicy]]:
+        """Returns the optimizer parameter groups and learning rate schedulers."""
+        learnable_components = [self.background_model]
+        param_groups, schedulers = zip(*(component.get_optimizer_param_groups(n_iterations) for component in learnable_components))
+        return sum(param_groups, []), sum(schedulers, [])
 
     def get_ply_dict(self) -> dict[str, np.ndarray | list[str]]:
         """Returns the model as a ply-compatible dictionary using structured numpy arrays."""
@@ -461,3 +734,4 @@ class HTGSModel(BaseModel):
         data['comments'] = ['SplatRenderMode: default', 'Generated with NeRFICG/HTGS']
 
         return data
+

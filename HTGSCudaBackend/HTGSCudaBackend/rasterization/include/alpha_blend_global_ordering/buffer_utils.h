@@ -32,8 +32,9 @@ namespace htgs::rasterization::alpha_blend_global_ordering {
         float* depth;
         float4* rgba = nullptr;
         bool* rgb_clamp_info = nullptr;
+        float* opacity = nullptr;
 
-        static PerPrimitiveBuffers from_blob(char*& blob, int n_primitives, bool store_rgba, bool store_rgb_clamp_info) {
+        static PerPrimitiveBuffers from_blob(char*& blob, int n_primitives, bool store_rgba, bool store_rgb_clamp_info, bool store_opacity) {
             PerPrimitiveBuffers buffers;
             obtain(blob, buffers.n_touched_tiles, n_primitives, 128);
             obtain(blob, buffers.offset, n_primitives, 128);
@@ -44,6 +45,7 @@ namespace htgs::rasterization::alpha_blend_global_ordering {
             obtain(blob, buffers.depth, n_primitives, 128);
             if (store_rgba) obtain(blob, buffers.rgba, n_primitives, 128);
             if (store_rgb_clamp_info) obtain(blob, buffers.rgb_clamp_info, n_primitives * 3, 128);
+            if (store_opacity) obtain(blob, buffers.opacity, n_primitives, 128);
             cub::DeviceScan::InclusiveSum(
                 nullptr, buffers.cub_workspace_size,
                 buffers.n_touched_tiles, buffers.offset,

@@ -33,9 +33,14 @@ torch::Tensor htgs::rasterization::fast_inference_wrapper(
     const int active_sh_bases,
     const int width,
     const int height,
+    const float focal_x,
+    const float focal_y,
+    const float center_x,
+    const float center_y,
     const float near_plane,
     const float far_plane,
     const float scale_modifier,
+    const bool use_aaa_mode,
     const bool to_chw)
 {
     const RasterizerMode mode = static_cast<RasterizerMode>(rasterizer_mode);
@@ -73,9 +78,14 @@ torch::Tensor htgs::rasterization::fast_inference_wrapper(
                 total_sh_bases,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
                 far_plane,
                 scale_modifier,
+                use_aaa_mode,
                 to_chw);
             break;
         case RasterizerMode::ALPHA_BLEND_FIRST_K:
@@ -99,9 +109,14 @@ torch::Tensor htgs::rasterization::fast_inference_wrapper(
                 total_sh_bases,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
                 far_plane,
                 scale_modifier,
+                use_aaa_mode,
                 to_chw);
             break;
         case RasterizerMode::ALPHA_BLEND_GLOBAL_ORDERING:
@@ -124,9 +139,14 @@ torch::Tensor htgs::rasterization::fast_inference_wrapper(
                 total_sh_bases,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
                 far_plane,
                 scale_modifier,
+                use_aaa_mode,
                 to_chw);
             break;
         case RasterizerMode::OIT_BLEND:
@@ -149,9 +169,14 @@ torch::Tensor htgs::rasterization::fast_inference_wrapper(
                 total_sh_bases,
                 width,
                 height,
+                focal_x,
+                focal_y,
+                center_x,
+                center_y,
                 near_plane,
                 far_plane,
                 scale_modifier,
+                use_aaa_mode,
                 to_chw);
             break;
         default:

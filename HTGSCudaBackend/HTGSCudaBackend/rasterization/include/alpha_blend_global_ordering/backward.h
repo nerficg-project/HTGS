@@ -6,7 +6,9 @@ namespace htgs::rasterization::alpha_blend_global_ordering {
 
     void backward(
         const float* grad_image,
+        const float* grad_alpha,
         const float* image,
+        const float* alpha,
         const float3* positions,
         const float3* scales,
         const float4* rotations,
@@ -33,6 +35,8 @@ namespace htgs::rasterization::alpha_blend_global_ordering {
         const int height,
         const int n_instances,
         const int instance_primitive_indices_selector,
+        const float max_focal,
+        const bool use_aaa_mode,
         const bool use_distance_scaling);
 
 }

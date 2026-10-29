@@ -18,6 +18,7 @@ namespace htgs::rasterization::alpha_blend_global_ordering::config {
     DEF float min_alpha_threshold_rcp = 255.0f;
     DEF float min_alpha_threshold = 1.0f / min_alpha_threshold_rcp; // 0.00392156862
     DEF float max_cutoff_sq = 11.0825270903f; // logf(min_alpha_threshold_rcp * min_alpha_threshold_rcp)
+    DEF float aa_kernel_size = 0.1f;
     // block size constants
     DEF int block_size_preprocess = 256;
     DEF int block_size_create_instances = 256;

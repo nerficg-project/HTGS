@@ -1,60 +1,17 @@
 """HTGS/Renderer.py: Defines the renderer for the HTGS method."""
 
 import torch
-import numpy as np
 
 import Framework
-from Cameras.Perspective import PerspectiveCamera
 from Datasets.Base import BaseDataset
 from Datasets.utils import View
 from Logging import Logger
-from Methods.HTGS.HTGSCudaBackend import diff_rasterize, rasterize, fast_rasterize, update_max_weights, RasterizerSettings, RasterizerMode
 from Methods.Base.Renderer import BaseModel
 from Methods.Base.Renderer import BaseRenderer
+from Methods.HTGS.HTGSCudaBackend import diff_rasterize, rasterize, fast_rasterize, update_max_weights
 from Methods.HTGS.Model import HTGSModel
+from Methods.HTGS.utils import extract_settings
 from Visual.utils import apply_color_map
-
-
-def extract_settings(
-    view: View,
-    mode: int,
-    K: int,
-    active_sh_bases: int,
-    scale_modifier: float,
-) -> RasterizerSettings:
-    if not isinstance(view.camera, PerspectiveCamera):
-        raise Framework.RendererError('HTGS renderer only supports perspective cameras')
-    if view.camera.distortion is not None:
-        Logger.log_warning('found distortion parameters that will be ignored by the rasterizer')
-    try:
-        rasterizer_mode = RasterizerMode(mode)
-    except ValueError:
-        Logger.log_warning(f'Invalid rasterizer mode: {mode}. Defaulting to HYBRID_BLEND.')
-        rasterizer_mode = RasterizerMode.HYBRID_BLEND
-    M = view.w2c_numpy
-    near_plane = view.camera.near_plane
-    far_plane = view.camera.far_plane
-    z_range = far_plane - near_plane
-    VP = np.array([
-        [view.camera.focal_x, 0.0, view.camera.center_x - 0.5, 0.0],
-        [0.0, view.camera.focal_y, view.camera.center_y - 0.5, 0.0],
-        [0.0, 0.0, (far_plane + near_plane) / z_range, -2.0 * far_plane * near_plane / z_range],
-        [0.0, 0.0, 1.0, 0.0]
-    ], dtype=M.dtype)
-    VPM = VP @ M
-    return RasterizerSettings(
-        M=torch.as_tensor(M, dtype=torch.float32, device='cuda'),
-        VPM=torch.as_tensor(VPM, dtype=torch.float32, device='cuda'),
-        cam_position=view.position,
-        mode=rasterizer_mode,
-        K=K,
-        active_sh_bases=active_sh_bases,
-        width=view.camera.width,
-        height=view.camera.height,
-        near_plane=near_plane,
-        far_plane=far_plane,
-        scale_modifier=scale_modifier,
-    )
 
 
 @Framework.Configurable.configure(
@@ -66,7 +23,9 @@ def extract_settings(
     DISABLE_SH2=False,
     DISABLE_SH3=False,
     USE_MEDIAN_DEPTH=False,
+    USE_AAA_MODE=True,
     FORCE_OPTIMIZED_INFERENCE=False,
+    DISABLE_BG_MODEL_INFERENCE=False,
 )
 class HTGSRenderer(BaseRenderer):
     """Renderer for the HTGS method."""
@@ -91,7 +50,13 @@ class HTGSRenderer(BaseRenderer):
         else:
             return self.render_image_inference(view, to_chw)
 
-    def render_image_training(self, view: View, update_densification_info: bool, use_distance_scaling: bool) -> torch.Tensor:
+    def render_image_training(
+        self,
+        view: View,
+        update_densification_info: bool,
+        use_distance_scaling: bool,
+        discard_color: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """Renders an image for a given view for optimization."""
         settings = extract_settings(
             view=view,
@@ -99,8 +64,9 @@ class HTGSRenderer(BaseRenderer):
             K=self.K,
             active_sh_bases=self.model.gaussians.active_sh_bases,
             scale_modifier=1.0,
+            use_aaa_mode=self.USE_AAA_MODE,
         )
-        return diff_rasterize(
+        rgb, alpha = diff_rasterize(
             positions=self.model.gaussians.get_positions,
             scales=self.model.gaussians.get_scales_with_3D_filter if self.model.gaussians.use_3d_filter else self.model.gaussians.get_scales,
             rotations=self.model.gaussians.get_rotations,
@@ -111,6 +77,11 @@ class HTGSRenderer(BaseRenderer):
             settings=settings,
             use_distance_scaling=use_distance_scaling and update_densification_info,
         )
+        if self.model.background_model is None:
+            rgb = rgb + (1.0 - alpha) * view.camera.background_color[:, None, None]
+        else:
+            rgb = rgb + (1.0 - alpha) * self.model.eval_background(view, to_chw=True, discard_color=discard_color)
+        return rgb, alpha
 
     @torch.no_grad()
     def render_image_inference(self, view: View, to_chw: bool) -> dict[str, torch.Tensor]:
@@ -135,8 +106,9 @@ class HTGSRenderer(BaseRenderer):
             K=self.K,
             active_sh_bases=self.model.gaussians.active_sh_bases,
             scale_modifier=self.SCALE_MODIFIER,
+            use_aaa_mode=self.USE_AAA_MODE,
         )
-        rgb, depth = rasterize(
+        rgb, depth, alpha = rasterize(
             positions=self.model.gaussians.get_positions,
             scales=self.model.gaussians.get_scales_with_3D_filter if self.model.gaussians.use_3d_filter else self.model.gaussians.get_scales,
             rotations=self.model.gaussians.get_rotations,
@@ -147,9 +119,16 @@ class HTGSRenderer(BaseRenderer):
             to_chw=to_chw,
             use_median_depth=self.USE_MEDIAN_DEPTH,
         )
+
+        if self.model.background_model is None or self.DISABLE_BG_MODEL_INFERENCE:
+            rgb += (1.0 - alpha) * (view.camera.background_color[:, None, None] if to_chw else view.camera.background_color)
+        else:
+            rgb = rgb + (1.0 - alpha) * self.model.eval_background(view, to_chw)
+
         return {
             'rgb': rgb,
-            'depth': depth
+            'depth': depth,
+            'alpha': alpha,
         }
 
     @torch.inference_mode()
@@ -161,6 +140,7 @@ class HTGSRenderer(BaseRenderer):
             K=self.K,
             active_sh_bases=self.model.gaussians.active_sh_bases,
             scale_modifier=self.SCALE_MODIFIER,
+            use_aaa_mode=self.USE_AAA_MODE,
         )
         rgb = fast_rasterize(
             positions=self.model.gaussians.get_positions,
@@ -188,6 +168,7 @@ class HTGSRenderer(BaseRenderer):
                 K=self.K,
                 active_sh_bases=0,
                 scale_modifier=1.0,
+                use_aaa_mode=self.USE_AAA_MODE,
             )
             update_max_weights(
                 max_weights=max_weights,
@@ -199,16 +180,3 @@ class HTGSRenderer(BaseRenderer):
                 weight_threshold=threshold,
             )
         return max_weights
-
-    def postprocess_outputs(self, outputs: dict[str, torch.Tensor], *_) -> dict[str, torch.Tensor]:
-        """Postprocesses the model outputs, returning tensors of shape 3xHxW."""
-        return {
-            'rgb': outputs['rgb'],
-            'depth': apply_color_map(
-                color_map='SPECTRAL',
-                image=outputs['depth'],
-                min_max=None,
-                mask=outputs['depth'] > 0.0,
-                interpolate=True
-            ),
-        }

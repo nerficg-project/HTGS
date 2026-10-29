@@ -21,12 +21,18 @@ namespace htgs::rasterization::oit_blend {
         const float4* VPM,
         const float3* cam_position,
         float* image,
+        float* alpha,
         const int n_primitives,
         const int active_sh_bases,
         const int total_sh_bases,
         const int width,
         const int height,
+        const float focal_x,
+        const float focal_y,
+        const float center_x,
+        const float center_y,
         const float near_plane,
-        const float far_plane);
+        const float far_plane,
+        const bool use_aaa_mode);
 
 }

@@ -15,13 +15,19 @@ namespace htgs::rasterization::alpha_blend_first_k {
         const float* opacities,
         const float4* M,
         const float4* VPM,
+        const float3* cam_position,
         float* max_weights,
         const int K,
         const int n_primitives,
         const int width,
         const int height,
+        const float focal_x,
+        const float focal_y,
+        const float center_x,
+        const float center_y,
         const float near_plane,
         const float far_plane,
-        const float weight_threshold);
+        const float weight_threshold,
+        const bool use_aaa_mode);
 
 }

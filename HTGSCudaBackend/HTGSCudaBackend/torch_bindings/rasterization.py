@@ -22,9 +22,14 @@ class RasterizerSettings(NamedTuple):
     active_sh_bases: int  # number of spherical harmonics bases to use for color computation
     width: int
     height: int
+    focal_x: float
+    focal_y: float
+    center_x: float
+    center_y: float
     near_plane: float
     far_plane: float
     scale_modifier: float  # scaling factor to be applied to each Gaussian
+    use_aaa_mode: bool  # whether to use anti-aliasing and view-space bounding from AAA Gaussians instead or original HTGS screen-space bounding
 
     def as_tuple(self) -> tuple:
         return (
@@ -36,9 +41,14 @@ class RasterizerSettings(NamedTuple):
             self.active_sh_bases,
             self.width,
             self.height,
+            self.focal_x,
+            self.focal_y,
+            self.center_x,
+            self.center_y,
             self.near_plane,
             self.far_plane,
             self.scale_modifier,
+            self.use_aaa_mode,
         )
 
 
@@ -55,8 +65,8 @@ class _Rasterize(torch.autograd.Function):
         densification_info: torch.Tensor,
         rasterizer_settings: RasterizerSettings,
         use_distance_scaling: bool,
-    ) -> torch.Tensor:
-        image, per_primitive_buffers, per_tile_buffers, per_instance_buffers, per_pixel_buffers, n_instances, instance_primitive_indices_selector = _C.forward(
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        image, alpha, per_primitive_buffers, per_tile_buffers, per_instance_buffers, per_pixel_buffers, n_instances, instance_primitive_indices_selector = _C.forward(
             positions,
             scales,
             rotations,
@@ -70,10 +80,11 @@ class _Rasterize(torch.autograd.Function):
         ctx.instance_primitive_indices_selector = instance_primitive_indices_selector
         ctx.save_for_backward(
             image if rasterizer_settings.mode == RasterizerMode.ALPHA_BLEND_GLOBAL_ORDERING else torch.empty(0),
+            alpha,
             positions,
             scales,
             rotations,
-            opacities if rasterizer_settings.mode == RasterizerMode.ALPHA_BLEND_FIRST_K else torch.empty(0),
+            opacities if rasterizer_settings.mode == RasterizerMode.ALPHA_BLEND_FIRST_K or rasterizer_settings.use_aaa_mode else torch.empty(0),
             sh_rest,
             per_primitive_buffers,
             per_tile_buffers,
@@ -83,17 +94,19 @@ class _Rasterize(torch.autograd.Function):
         ctx.densification_info = densification_info
         ctx.mark_non_differentiable(densification_info)
         ctx.use_distance_scaling = use_distance_scaling
-        return image
+        return image, alpha
 
     @staticmethod
     @once_differentiable
     def backward(
         ctx: Any,
         grad_image: torch.Tensor,
+        grad_alpha: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, None, None, None]:
         grad_positions, grad_scales, grad_rotations, grad_opacities, grad_sh_0, grad_sh_rest = _C.backward(
             ctx.densification_info,
             grad_image,
+            grad_alpha,
             *ctx.saved_tensors,
             *ctx.rasterizer_settings.as_tuple(),
             ctx.n_instances,
@@ -123,7 +136,7 @@ def diff_rasterize(
     densification_info: torch.Tensor,
     settings: RasterizerSettings,
     use_distance_scaling: bool,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     return _Rasterize.apply(
         positions,
         scales,
@@ -147,8 +160,8 @@ def rasterize(
     settings: RasterizerSettings,
     to_chw: bool,
     use_median_depth: bool,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    image, depth = _C.render(
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    image, depth, alpha = _C.render(
         positions,
         scales,
         rotations,
@@ -160,7 +173,8 @@ def rasterize(
         use_median_depth,
     )
     depth = depth.unsqueeze(0) if to_chw else depth.unsqueeze(-1)
-    return image, depth
+    alpha = alpha.unsqueeze(0) if to_chw else alpha.unsqueeze(-1)
+    return image, depth, alpha
 
 
 def fast_rasterize(

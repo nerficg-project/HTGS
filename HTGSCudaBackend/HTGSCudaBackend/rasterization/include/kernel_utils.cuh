@@ -5,9 +5,10 @@
 #ifdef _WIN32
 #include <climits>
 #define __UINT32_MAX__ UINT32_MAX
+#define __FLT_MAX__ FLT_MAX
 #endif
 
-__device__ __constant__ float4 c_M3;
+__device__ __constant__ float4 c_M[3];
 __device__ __constant__ float4 c_VPM[4];
 __device__ __constant__ float3 c_cam_position;
 

@@ -7,26 +7,123 @@
 
 namespace htgs::rasterization::alpha_blend_first_k::kernels::backward {
 
+    template<bool aaa_mode>
     __global__ void preprocess_cu(
         const float3* positions,
+        const float3* scales,
+        const float4* rotations,
+        const float* opacities,
         const float3* sh_rest,
         const uint* primitive_n_touched_tiles,
         const bool* primitive_rgb_clamp_info,
         const float* densification_info_helper,
         float3* grad_positions,
+        float* grad_opacities,
+        float3* grad_scales,
+        float4* grad_rotations,
         float3* grad_sh_0,
         float3* grad_sh_rest,
         float* densification_info,
         const uint n_primitives,
         const uint active_sh_bases,
         const uint total_sh_bases,
+        const float max_focal,
         const bool use_distance_scaling)
     {
         const uint primitive_idx = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;
         if (primitive_idx >= n_primitives || primitive_n_touched_tiles[primitive_idx] == 0) return;
 
-        // sh/position gradients from view-dependent color
         const float3 position_world = positions[primitive_idx];
+
+        // anti-aliasing filter: the blend backward accumulated the gradients with respect to the
+        // dilated scale and the dilated opacity, so the filter is chained back here
+        float3 dfilter_dposition = make_float3(0.0f, 0.0f, 0.0f);
+        if constexpr (aaa_mode) {
+            const float3 original_scale = scales[primitive_idx];
+            const float4 quaternion = rotations[primitive_idx];
+            const Mat3x3 R = convert_quaternion_to_rotation_matrix(quaternion);
+            const float4 M3 = c_M[2];
+            const float z = dot(make_float3(M3), position_world) + M3.w;
+            const float filter_scale_view = z / max_focal; // can be negative but it's fine as only the squared value is used
+            const float filter_variance_view = filter_scale_view * filter_scale_view * config::aa_kernel_size;
+            const float3 original_variance = original_scale * original_scale;
+            const float3 variance = original_variance + filter_variance_view;
+            const float3 scale = make_float3(sqrtf(variance.x), sqrtf(variance.y), sqrtf(variance.z));
+            const float3 view_dir_world_raw = position_world - c_cam_position;
+            const float3 view_dir_world = normalize(view_dir_world_raw);
+            const float3 view_dir_gauss = make_float3(
+                R.r11 * view_dir_world.x + R.r21 * view_dir_world.y + R.r31 * view_dir_world.z,
+                R.r12 * view_dir_world.x + R.r22 * view_dir_world.y + R.r32 * view_dir_world.z,
+                R.r13 * view_dir_world.x + R.r23 * view_dir_world.y + R.r33 * view_dir_world.z
+            );
+            const float3 r = view_dir_gauss * view_dir_gauss;
+            const float det_mul_ray_var = dot(r, make_float3(original_variance.y * original_variance.z, original_variance.z * original_variance.x, original_variance.x * original_variance.y));
+            const float det_mul_ray_var_dil = dot(r, make_float3(variance.y * variance.z, variance.z * variance.x, variance.x * variance.y));
+            const float dilation_factor = sqrtf(__saturatef(det_mul_ray_var / det_mul_ray_var_dil));
+            const float dL_dopacity_filtered = grad_opacities[primitive_idx];
+            grad_opacities[primitive_idx] = dL_dopacity_filtered * dilation_factor;
+
+            const float dL_ddilation_factor = dL_dopacity_filtered * opacities[primitive_idx];
+            const float dL_dfilter_helper = dL_ddilation_factor * dilation_factor / (det_mul_ray_var * det_mul_ray_var_dil); // TODO: det_mul_ray_var can be zero
+            const float3 ddet_mul_ray_var_doriginal_scale = make_float3(
+                original_scale.x * (r.y * original_variance.z + r.z * original_variance.y),
+                original_scale.y * (r.x * original_variance.z + r.z * original_variance.x),
+                original_scale.z * (r.x * original_variance.y + r.y * original_variance.x)
+            );
+            const float3 ddet_mul_ray_var_dil_dvariance = make_float3(
+                r.y * variance.z + r.z * variance.y,
+                r.x * variance.z + r.z * variance.x,
+                r.x * variance.y + r.y * variance.x
+            );
+            const float3 ddet_mul_ray_var_dil_doriginal_scale = original_scale * ddet_mul_ray_var_dil_dvariance;
+            const float dL_ddet_mul_ray_var_dil = dL_ddilation_factor * -dilation_factor / det_mul_ray_var_dil;
+            // the dilated scale depends on the filter variance as well, with d scale_i / dfilter_variance_view = 1 / (2 * scale_i);
+            // the factor of 2 cancels against the one omitted from d filter_variance_view / dz in dL_dz below
+            const float3 dL_dscale = grad_scales[primitive_idx];
+            const float dL_dfilter_variance_view = dL_ddet_mul_ray_var_dil * (ddet_mul_ray_var_dil_dvariance.x + ddet_mul_ray_var_dil_dvariance.y + ddet_mul_ray_var_dil_dvariance.z)
+                + dL_dscale.x / scale.x + dL_dscale.y / scale.y + dL_dscale.z / scale.z;
+            const float dL_dz = dL_dfilter_variance_view * filter_scale_view * config::aa_kernel_size / max_focal;
+            const float3 ddet_mul_ray_var_dview_dir_gauss = make_float3(
+                view_dir_gauss.x * original_variance.y * original_variance.z,
+                view_dir_gauss.y * original_variance.x * original_variance.z,
+                view_dir_gauss.z * original_variance.x * original_variance.y
+            );
+            const float3 ddet_mul_ray_var_dil_dview_dir_gauss = make_float3(
+                view_dir_gauss.x * variance.y * variance.z,
+                view_dir_gauss.y * variance.x * variance.z,
+                view_dir_gauss.z * variance.x * variance.y
+            );
+            const float3 dL_dview_dir_gauss = dL_dfilter_helper * (det_mul_ray_var_dil * ddet_mul_ray_var_dview_dir_gauss - det_mul_ray_var * ddet_mul_ray_var_dil_dview_dir_gauss);
+
+            const float3 dL_dview_dir_world = make_float3(
+                R.r11 * dL_dview_dir_gauss.x + R.r12 * dL_dview_dir_gauss.y + R.r13 * dL_dview_dir_gauss.z,
+                R.r21 * dL_dview_dir_gauss.x + R.r22 * dL_dview_dir_gauss.y + R.r23 * dL_dview_dir_gauss.z,
+                R.r31 * dL_dview_dir_gauss.x + R.r32 * dL_dview_dir_gauss.y + R.r33 * dL_dview_dir_gauss.z
+            );
+
+            const float x_raw = view_dir_world_raw.x, y_raw = view_dir_world_raw.y, z_raw = view_dir_world_raw.z;
+            const float xx_raw = x_raw * x_raw, yy_raw = y_raw * y_raw, zz_raw = z_raw * z_raw;
+            const float xy_raw = x_raw * y_raw, xz_raw = x_raw * z_raw, yz_raw = y_raw * z_raw;
+            const float norm_sq = xx_raw + yy_raw + zz_raw;
+
+            dfilter_dposition = dL_dz * make_float3(M3) + make_float3(
+                (yy_raw + zz_raw) * dL_dview_dir_world.x - xy_raw * dL_dview_dir_world.y - xz_raw * dL_dview_dir_world.z,
+                -xy_raw * dL_dview_dir_world.x + (xx_raw + zz_raw) * dL_dview_dir_world.y - yz_raw * dL_dview_dir_world.z,
+                -xz_raw * dL_dview_dir_world.x - yz_raw * dL_dview_dir_world.y + (xx_raw + yy_raw) * dL_dview_dir_world.z
+            ) * rsqrtf(norm_sq * norm_sq * norm_sq);
+
+            grad_scales[primitive_idx] = dL_dscale * original_scale / scale + dL_dfilter_helper * (det_mul_ray_var_dil * ddet_mul_ray_var_doriginal_scale - det_mul_ray_var * ddet_mul_ray_var_dil_doriginal_scale);
+
+            // rotation/quaternion gradients from the dilated view direction
+            const Mat3x3 dL_dR = {
+                view_dir_world.x * dL_dview_dir_gauss.x, view_dir_world.x * dL_dview_dir_gauss.y, view_dir_world.x * dL_dview_dir_gauss.z,
+                view_dir_world.y * dL_dview_dir_gauss.x, view_dir_world.y * dL_dview_dir_gauss.y, view_dir_world.y * dL_dview_dir_gauss.z,
+                view_dir_world.z * dL_dview_dir_gauss.x, view_dir_world.z * dL_dview_dir_gauss.y, view_dir_world.z * dL_dview_dir_gauss.z
+            };
+            grad_rotations[primitive_idx] += convert_quaternion_to_rotation_matrix_backward(quaternion, dL_dR);
+        }
+
+        // sh/position gradients from view-dependent color
         const float3 drgb_dposition = convert_sh_to_rgb_backward(
             sh_rest,
             primitive_rgb_clamp_info,
@@ -39,13 +136,13 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::backward {
             total_sh_bases
         );
         if (densification_info != nullptr) {
-            const float3 dL_dposition = grad_positions[primitive_idx] + drgb_dposition;
+            const float3 dL_dposition = grad_positions[primitive_idx] + drgb_dposition + dfilter_dposition;
             grad_positions[primitive_idx] = dL_dposition;
 
             // create densification_info from position gradients
             float z_scale = 1.0f;
             if (use_distance_scaling) {
-                const float4 M3 = c_M3;
+                const float4 M3 = c_M[2];
                 z_scale = (dot(make_float3(M3), position_world) + M3.w) * 0.5f;
             }
             densification_info[primitive_idx] += 1.0f;
@@ -53,11 +150,11 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::backward {
             if (densification_info_helper != nullptr) densification_info[2 * n_primitives + primitive_idx] += z_scale * densification_info_helper[primitive_idx];
         }
         else {
-            grad_positions[primitive_idx] += drgb_dposition;
+            grad_positions[primitive_idx] += drgb_dposition + dfilter_dposition;
         }
     }
 
-    template <int K>
+    template <bool aaa_mode, int K>
     __global__ void blend_cu(
         const uint2* tile_instance_ranges,
         const uint* instance_primitive_indices,
@@ -67,9 +164,12 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::backward {
         const float4* primitive_VPMT1,
         const float4* primitive_VPMT2,
         const float4* primitive_VPMT4,
+        const float4* primitive_MT3,
         const uint* pixel_primitive_indices_core,
         const float4* pixel_grad_info_core,
         const float* grad_image,
+        const float* grad_alphas,
+        const float* alphas,
         float3* grad_positions,
         float3* grad_scales,
         float4* grad_rotations,
@@ -78,7 +178,8 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::backward {
         float* densification_info,
         const uint width,
         const uint n_fragments,
-        const uint n_pixels)
+        const uint n_pixels,
+        const float max_focal)
     {
         const uint fragment_idx = __umul24(blockIdx.x, blockDim.x) + threadIdx.x;
         if (fragment_idx >= n_fragments) return;
@@ -96,7 +197,7 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::backward {
         );
         const float4 precomputed_grad = pixel_grad_info_core[core_idx * n_pixels + pixel_idx];
         const float3 dL_drgb = precomputed_grad.w * grad_pixel;
-        const float dL_dalpha = dot(make_float3(precomputed_grad), grad_pixel);
+        float dL_dalpha = dot(make_float3(precomputed_grad), grad_pixel);
         // load primitive data
         const float4 VPMT1 = primitive_VPMT1[primitive_idx];
         const float4 VPMT2 = primitive_VPMT2[primitive_idx];
@@ -111,7 +212,10 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::backward {
         const float numerator_rho2 = dot(m, m);
         const float denominator_rcp = 1.0f / dot(d, d);
         const float G = expf(-0.5f * numerator_rho2 * denominator_rcp);
+
+        // grad from background color
         const float alpha = fminf(opacity * G, config::max_fragment_alpha);
+        dL_dalpha += grad_alphas[pixel_idx] * (1.0f - alphas[pixel_idx]) * (1.0f / fmaxf(1.0f - alpha, config::one_minus_alpha_eps));
 
         // color gradient
         if (dL_drgb.x != 0.0f) atomicAdd(&grad_sh_0[primitive_idx].x, dL_drgb.x);
@@ -170,7 +274,15 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::backward {
             atomicAdd(&grad_positions[primitive_idx].z, dL_dposition.z);
 
             // load/re-compute scale and rotation
-            const float3 scale = scales[primitive_idx];
+            const float3 original_scale = scales[primitive_idx];
+            float3 scale = original_scale;
+            if constexpr (aaa_mode) {
+                // the dilated scale is rebuilt from the view-space z the forward stored, so that
+                // the two passes cannot disagree on it
+                const float filter_scale_view = primitive_MT3[primitive_idx].w / max_focal;
+                const float3 variance = original_scale * original_scale + filter_scale_view * filter_scale_view * config::aa_kernel_size;
+                scale = make_float3(sqrtf(variance.x), sqrtf(variance.y), sqrtf(variance.z));
+            }
             const float4 quaternion = rotations[primitive_idx];
             const Mat3x3 R = convert_quaternion_to_rotation_matrix(quaternion);
 

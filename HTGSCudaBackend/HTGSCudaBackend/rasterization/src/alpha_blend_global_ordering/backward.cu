@@ -8,7 +8,9 @@
 
 void htgs::rasterization::alpha_blend_global_ordering::backward(
     const float* grad_image,
+    const float* grad_alpha,
     const float* image,
+    const float* alpha,
     const float3* positions,
     const float3* scales,
     const float4* rotations,
@@ -35,9 +37,11 @@ void htgs::rasterization::alpha_blend_global_ordering::backward(
     const int height,
     const int n_instances,
     const int instance_primitive_indices_selector,
+    const float max_focal,
+    const bool use_aaa_mode,
     const bool use_distance_scaling)
 {
-    if (use_distance_scaling) cudaMemcpyToSymbol(c_M3, M + 2, sizeof(float4), 0, cudaMemcpyDeviceToDevice);
+    cudaMemcpyToSymbol(c_M, M, 3 * sizeof(float4), 0, cudaMemcpyDeviceToDevice);
     cudaMemcpyToSymbol(c_VPM, VPM, 4 * sizeof(float4), 0, cudaMemcpyDeviceToDevice);
     cudaMemcpyToSymbol(c_cam_position, cam_position, sizeof(float3), 0, cudaMemcpyDeviceToDevice);
 
@@ -46,13 +50,14 @@ void htgs::rasterization::alpha_blend_global_ordering::backward(
     const int n_tiles = grid.x * grid.y;
     const int end_bit = extract_end_bit(n_tiles - 1) + 32;
 
-    constexpr bool store_rgba = true, store_rgb_clamp_info = true;
-    PerPrimitiveBuffers per_primitive_buffers = PerPrimitiveBuffers::from_blob(per_primitive_buffers_blob, n_primitives, store_rgba, store_rgb_clamp_info);
+    constexpr bool store_rgba = true, store_rgb_clamp_info = true, store_opacity = false;
+    PerPrimitiveBuffers per_primitive_buffers = PerPrimitiveBuffers::from_blob(per_primitive_buffers_blob, n_primitives, store_rgba, store_rgb_clamp_info, store_opacity);
     PerTileBuffers per_tile_buffers = PerTileBuffers::from_blob(per_tile_buffers_blob, n_tiles);
     PerInstanceBuffers per_instance_buffers = PerInstanceBuffers::from_blob(per_instance_buffers_blob, n_instances, end_bit);
     per_instance_buffers.primitive_indices.selector = instance_primitive_indices_selector;
 
-    kernels::backward::blend_cu<<<grid, block>>>(
+    const auto blend = use_aaa_mode ? kernels::backward::blend_cu<true> : kernels::backward::blend_cu<false>;
+    blend<<<grid, block>>>(
         per_tile_buffers.instance_ranges,
         per_instance_buffers.primitive_indices.Current(),
         scales,
@@ -61,8 +66,11 @@ void htgs::rasterization::alpha_blend_global_ordering::backward(
         per_primitive_buffers.VPMT2,
         per_primitive_buffers.VPMT4,
         per_primitive_buffers.rgba,
+        per_primitive_buffers.depth,
         grad_image,
+        grad_alpha,
         image,
+        alpha,
         grad_positions,
         grad_scales,
         grad_rotations,
@@ -71,23 +79,32 @@ void htgs::rasterization::alpha_blend_global_ordering::backward(
         densification_info_helper,
         width,
         height,
-        grid.x
+        grid.x,
+        max_focal
     );
     CHECK_CUDA(config::debug_backward, "blend_backward")
 
-    kernels::backward::preprocess_cu<<<div_round_up(n_primitives, config::block_size_preprocess), config::block_size_preprocess>>>(
+    const auto preprocess = use_aaa_mode ? kernels::backward::preprocess_cu<true> : kernels::backward::preprocess_cu<false>;
+    preprocess<<<div_round_up(n_primitives, config::block_size_preprocess), config::block_size_preprocess>>>(
         positions,
+        scales,
+        rotations,
+        opacities,
         sh_rest,
         per_primitive_buffers.n_touched_tiles,
         per_primitive_buffers.rgb_clamp_info,
         densification_info_helper,
         grad_positions,
+        grad_opacities,
+        grad_scales,
+        grad_rotations,
         grad_sh_0,
         grad_sh_rest,
         densification_info,
         n_primitives,
         active_sh_bases,
         total_sh_bases,
+        max_focal,
         use_distance_scaling
     );
     CHECK_CUDA(config::debug_backward, "preprocess_backward")

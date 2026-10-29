@@ -2,11 +2,13 @@
 
 #include "helper_math.h"
 #include "kernel_utils.cuh"
+#include "kernel_utils_aaa.cuh"
 #include "alpha_blend_first_k/config.h"
 #include <cooperative_groups.h>
 
 namespace htgs::rasterization::alpha_blend_first_k::kernels::forward {
 
+    template<bool aaa_mode>
     __global__ void preprocess_cu(
         const float3* positions,
         const float3* scales,
@@ -20,6 +22,7 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::forward {
         float4* primitive_VPMT2,
         float4* primitive_VPMT4,
         float4* primitive_MT3,
+        float* primitive_opacity,
         float3* primitive_rgb,
         bool* primitive_rgb_clamp_info,
         const uint n_primitives,
@@ -27,6 +30,12 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::forward {
         const uint grid_height,
         const uint active_sh_bases,
         const uint total_sh_bases,
+        const float width,
+        const float height,
+        const float focal_x,
+        const float focal_y,
+        const float center_x,
+        const float center_y,
         const float near_plane,
         const float far_plane)
     {
@@ -37,28 +46,57 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::forward {
 
         // transform and cull
         const float3 position_world = positions[primitive_idx];
-        const float opacity = opacities[primitive_idx];
-        const float4 M3 = c_M3;
-        uint n_touched_tiles;
-        uint4 screen_bounds;
-        float3 u, v, w;
-        float4 VPMT1, VPMT2, VPMT4;
-        float z;
-        if (transform_and_cull(
-            scales, rotations,
-            position_world, opacity, M3,
-            n_touched_tiles, screen_bounds, u, v, w, VPMT1, VPMT2, VPMT4, z,
-            primitive_idx, grid_width, grid_height, config::tile_width, config::tile_height,
-            near_plane, far_plane, config::min_alpha_threshold_rcp, 1.0f
-        )) return;
+        if constexpr (aaa_mode) {
+            float opacity = opacities[primitive_idx];
+            uint n_touched_tiles;
+            uint4 screen_bounds;
+            float3 u, v, w;
+            float4 VPMT1, VPMT2, VPMT4, MT3;
 
-        // write intermediate results
-        primitive_n_touched_tiles[primitive_idx] = n_touched_tiles;
-        primitive_screen_bounds[primitive_idx] = screen_bounds;
-        primitive_VPMT1[primitive_idx] = VPMT1;
-        primitive_VPMT2[primitive_idx] = VPMT2;
-        primitive_VPMT4[primitive_idx] = VPMT4;
-        primitive_MT3[primitive_idx] = make_float4(dot(make_float3(M3), u), dot(make_float3(M3), v), dot(make_float3(M3), w), z);
+            // improved transform and cull
+            const bool culled = transform_and_cull_aaa(
+                scales, rotations,
+                position_world,
+                n_touched_tiles, screen_bounds, u, v, w, VPMT1, VPMT2, VPMT4, MT3, opacity,
+                primitive_idx, grid_width, grid_height, config::tile_width, config::tile_height,
+                width, height, focal_x, focal_y, center_x, center_y,
+                config::aa_kernel_size, config::min_alpha_threshold, config::min_alpha_threshold_rcp, 1.0f
+            );
+            __syncwarp();
+            if (culled) return;
+
+            // write intermediate results
+            primitive_n_touched_tiles[primitive_idx] = n_touched_tiles;
+            primitive_screen_bounds[primitive_idx] = screen_bounds;
+            primitive_VPMT1[primitive_idx] = VPMT1;
+            primitive_VPMT2[primitive_idx] = VPMT2;
+            primitive_VPMT4[primitive_idx] = VPMT4;
+            primitive_MT3[primitive_idx] = MT3;
+            primitive_opacity[primitive_idx] = opacity;
+        } else {
+            const float opacity = opacities[primitive_idx];
+            const float4 M3 = c_M[2];
+            uint n_touched_tiles;
+            uint4 screen_bounds;
+            float3 u, v, w;
+            float4 VPMT1, VPMT2, VPMT4;
+            float z;
+            if (transform_and_cull(
+                scales, rotations,
+                position_world, opacity, M3,
+                n_touched_tiles, screen_bounds, u, v, w, VPMT1, VPMT2, VPMT4, z,
+                primitive_idx, grid_width, grid_height, config::tile_width, config::tile_height,
+                near_plane, far_plane, config::min_alpha_threshold_rcp, 1.0f
+            )) return;
+
+            // write intermediate results
+            primitive_n_touched_tiles[primitive_idx] = n_touched_tiles;
+            primitive_screen_bounds[primitive_idx] = screen_bounds;
+            primitive_VPMT1[primitive_idx] = VPMT1;
+            primitive_VPMT2[primitive_idx] = VPMT2;
+            primitive_VPMT4[primitive_idx] = VPMT4;
+            primitive_MT3[primitive_idx] = make_float4(dot(make_float3(M3), u), dot(make_float3(M3), v), dot(make_float3(M3), w), z);
+        }
 
         // compute view-dependent color
         const float3 rgb = convert_sh_to_rgb<true>(
@@ -86,6 +124,7 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::forward {
         const float4* primitive_MT3,
         const float3* primitive_rgb,
         float* image,
+        float* alphas,
         uint* pixel_primitive_indices_core,
         float4* pixel_grad_info_core,
         const uint width,
@@ -200,9 +239,9 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::forward {
                 const float one_minus_alpha = 1.0f - alpha;
                 const float one_minus_alpha_rcp = 1.0f / fmaxf(one_minus_alpha, config::one_minus_alpha_eps);
                 pixel_grad_info_core[core_idx * n_pixels + pixel_idx] = make_float4(
-                    rgb.x * transmittance - (rgb_pixel.x - rgb_pixel_new.x) * one_minus_alpha_rcp,
-                    rgb.y * transmittance - (rgb_pixel.y - rgb_pixel_new.y) * one_minus_alpha_rcp,
-                    rgb.z * transmittance - (rgb_pixel.z - rgb_pixel_new.z) * one_minus_alpha_rcp,
+                    rgb.x * transmittance + (rgb_pixel_new.x - rgb_pixel.x) * one_minus_alpha_rcp,
+                    rgb.y * transmittance + (rgb_pixel_new.y - rgb_pixel.y) * one_minus_alpha_rcp,
+                    rgb.z * transmittance + (rgb_pixel_new.z - rgb_pixel.z) * one_minus_alpha_rcp,
                     blending_weight
                 );
                 transmittance *= one_minus_alpha;
@@ -211,6 +250,7 @@ namespace htgs::rasterization::alpha_blend_first_k::kernels::forward {
             image[pixel_idx] = rgb_pixel.x;
             image[n_pixels + pixel_idx] = rgb_pixel.y;
             image[2 * n_pixels + pixel_idx] = rgb_pixel.z;
+            alphas[pixel_idx] = transmittance < config::transmittance_threshold ? 1.0f : 1.0f - transmittance;
         }
     }
 

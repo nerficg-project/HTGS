@@ -24,18 +24,24 @@ void htgs::rasterization::alpha_blend_global_ordering::inference(
     const float3* cam_position,
     float* image,
     float* depth,
+    float* alpha,
     const int n_primitives,
     const int active_sh_bases,
     const int total_sh_bases,
     const int width,
     const int height,
+    const float focal_x,
+    const float focal_y,
+    const float center_x,
+    const float center_y,
     const float near_plane,
     const float far_plane,
     const float scale_modifier,
+    const bool use_aaa_mode,
     const bool to_chw,
     const bool use_median_depth)
 {
-    cudaMemcpyToSymbol(c_M3, M + 2, sizeof(float4), 0, cudaMemcpyDeviceToDevice);
+    cudaMemcpyToSymbol(c_M, M, 3 * sizeof(float4), 0, cudaMemcpyDeviceToDevice);
     cudaMemcpyToSymbol(c_VPM, VPM, 4 * sizeof(float4), 0, cudaMemcpyDeviceToDevice);
     cudaMemcpyToSymbol(c_cam_position, cam_position, sizeof(float3), 0, cudaMemcpyDeviceToDevice);
 
@@ -44,9 +50,10 @@ void htgs::rasterization::alpha_blend_global_ordering::inference(
     const int n_tiles = grid.x * grid.y;
     const int end_bit = extract_end_bit(n_tiles - 1) + 32;
 
-    constexpr bool store_rgba = true, store_rgb_clamp_info = false;
-    char* per_primitive_buffers_blob = per_primitive_buffers_func(required<PerPrimitiveBuffers>(n_primitives, store_rgba, store_rgb_clamp_info));
-    PerPrimitiveBuffers per_primitive_buffers = PerPrimitiveBuffers::from_blob(per_primitive_buffers_blob, n_primitives, store_rgba, store_rgb_clamp_info);
+    // the dilated opacity rides in the alpha channel of rgba, so AAA mode needs no extra buffer here
+    constexpr bool store_rgba = true, store_rgb_clamp_info = false, store_opacity = false;
+    char* per_primitive_buffers_blob = per_primitive_buffers_func(required<PerPrimitiveBuffers>(n_primitives, store_rgba, store_rgb_clamp_info, store_opacity));
+    PerPrimitiveBuffers per_primitive_buffers = PerPrimitiveBuffers::from_blob(per_primitive_buffers_blob, n_primitives, store_rgba, store_rgb_clamp_info, store_opacity);
 
     char* per_tile_buffers_blob = per_tile_buffers_func(required<PerTileBuffers>(n_tiles));
     PerTileBuffers per_tile_buffers = PerTileBuffers::from_blob(per_tile_buffers_blob, n_tiles);
@@ -62,7 +69,8 @@ void htgs::rasterization::alpha_blend_global_ordering::inference(
     }
     else cudaMemset(per_tile_buffers.instance_ranges, 0, sizeof(uint2) * n_tiles);
 
-    kernels::inference::preprocess_cu<<<div_round_up(n_primitives, config::block_size_preprocess), config::block_size_preprocess>>>(
+    const auto preprocess = use_aaa_mode ? kernels::inference::preprocess_cu<true> : kernels::inference::preprocess_cu<false>;
+    preprocess<<<div_round_up(n_primitives, config::block_size_preprocess), config::block_size_preprocess>>>(
         positions,
         scales,
         rotations,
@@ -81,6 +89,12 @@ void htgs::rasterization::alpha_blend_global_ordering::inference(
         grid.y,
         active_sh_bases,
         total_sh_bases,
+        static_cast<float>(width),
+        static_cast<float>(height),
+        focal_x,
+        focal_y,
+        center_x,
+        center_y,
         near_plane,
         far_plane,
         scale_modifier
@@ -145,6 +159,7 @@ void htgs::rasterization::alpha_blend_global_ordering::inference(
         per_primitive_buffers.depth,
         image,
         depth,
+        alpha,
         width,
         height,
         grid.x,

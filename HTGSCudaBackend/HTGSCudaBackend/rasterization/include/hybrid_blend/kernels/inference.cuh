@@ -2,11 +2,13 @@
 
 #include "helper_math.h"
 #include "kernel_utils.cuh"
+#include "kernel_utils_aaa.cuh"
 #include "hybrid_blend/config.h"
 #include <cooperative_groups.h>
 
 namespace htgs::rasterization::hybrid_blend::kernels::inference {
 
+    template<bool aaa_mode>
     __global__ void preprocess_cu(
         const float3* positions,
         const float3* scales,
@@ -26,6 +28,12 @@ namespace htgs::rasterization::hybrid_blend::kernels::inference {
         const uint grid_height,
         const uint active_sh_bases,
         const uint total_sh_bases,
+        const float width,
+        const float height,
+        const float focal_x,
+        const float focal_y,
+        const float center_x,
+        const float center_y,
         const float near_plane,
         const float far_plane,
         const float scale_modifier)
@@ -37,28 +45,55 @@ namespace htgs::rasterization::hybrid_blend::kernels::inference {
 
         // transform and cull
         const float3 position_world = positions[primitive_idx];
-        const float opacity = opacities[primitive_idx];
-        const float4 M3 = c_M3;
-        uint n_touched_tiles;
-        uint4 screen_bounds;
-        float3 u, v, w;
-        float4 VPMT1, VPMT2, VPMT4;
-        float z;
-        if (transform_and_cull(
-            scales, rotations,
-            position_world, opacity, M3,
-            n_touched_tiles, screen_bounds, u, v, w, VPMT1, VPMT2, VPMT4, z,
-            primitive_idx, grid_width, grid_height, config::tile_width, config::tile_height,
-            near_plane, far_plane, config::min_alpha_threshold_rcp, scale_modifier
-        )) return;
+        float opacity = opacities[primitive_idx];
+        if constexpr (aaa_mode) {
+            uint n_touched_tiles;
+            uint4 screen_bounds;
+            float3 u, v, w;
+            float4 VPMT1, VPMT2, VPMT4, MT3;
 
-        // write intermediate results
-        primitive_n_touched_tiles[primitive_idx] = n_touched_tiles;
-        primitive_screen_bounds[primitive_idx] = screen_bounds;
-        primitive_VPMT1[primitive_idx] = VPMT1;
-        primitive_VPMT2[primitive_idx] = VPMT2;
-        primitive_VPMT4[primitive_idx] = VPMT4;
-        primitive_MT3[primitive_idx] = make_float4(dot(make_float3(M3), u), dot(make_float3(M3), v), dot(make_float3(M3), w), z);
+            // improved transform and cull
+            const bool culled = transform_and_cull_aaa(
+                scales, rotations,
+                position_world,
+                n_touched_tiles, screen_bounds, u, v, w, VPMT1, VPMT2, VPMT4, MT3, opacity,
+                primitive_idx, grid_width, grid_height, config::tile_width, config::tile_height,
+                width, height, focal_x, focal_y, center_x, center_y,
+                config::aa_kernel_size, config::min_alpha_threshold, config::min_alpha_threshold_rcp, scale_modifier
+            );
+            __syncwarp();
+            if (culled) return;
+
+            // write intermediate results
+            primitive_n_touched_tiles[primitive_idx] = n_touched_tiles;
+            primitive_screen_bounds[primitive_idx] = screen_bounds;
+            primitive_VPMT1[primitive_idx] = VPMT1;
+            primitive_VPMT2[primitive_idx] = VPMT2;
+            primitive_VPMT4[primitive_idx] = VPMT4;
+            primitive_MT3[primitive_idx] = MT3;
+        } else {
+            const float4 M3 = c_M[2];
+            uint n_touched_tiles;
+            uint4 screen_bounds;
+            float3 u, v, w;
+            float4 VPMT1, VPMT2, VPMT4;
+            float z;
+            if (transform_and_cull(
+                scales, rotations,
+                position_world, opacity, M3,
+                n_touched_tiles, screen_bounds, u, v, w, VPMT1, VPMT2, VPMT4, z,
+                primitive_idx, grid_width, grid_height, config::tile_width, config::tile_height,
+                near_plane, far_plane, config::min_alpha_threshold_rcp, scale_modifier
+            )) return;
+    
+            // write intermediate results
+            primitive_n_touched_tiles[primitive_idx] = n_touched_tiles;
+            primitive_screen_bounds[primitive_idx] = screen_bounds;
+            primitive_VPMT1[primitive_idx] = VPMT1;
+            primitive_VPMT2[primitive_idx] = VPMT2;
+            primitive_VPMT4[primitive_idx] = VPMT4;
+            primitive_MT3[primitive_idx] = make_float4(dot(make_float3(M3), u), dot(make_float3(M3), v), dot(make_float3(M3), w), z);
+        }
 
         // compute view-dependent color
         const float3 rgb = convert_sh_to_rgb<false>(
@@ -86,6 +121,7 @@ namespace htgs::rasterization::hybrid_blend::kernels::inference {
         const float4* primitive_rgba,
         float* image,
         float* depths,
+        float* alphas,
         const uint width,
         const uint height,
         const uint grid_width,
@@ -153,7 +189,7 @@ namespace htgs::rasterization::hybrid_blend::kernels::inference {
                     const float3 eval_point_diag = cross(d, m) * denominator_rcp;
                     const float4 MT3 = collected_MT3[j];
                     float depth = dot(make_float3(MT3), eval_point_diag) + MT3.w;
-
+    
                     const float3 rgb = collected_rgb[j];
                     float4 rgba_premultiplied = make_float4(rgb.x * alpha, rgb.y * alpha, rgb.z * alpha, alpha);
                     if (depth < depths_core[K - 1] && alpha >= config::min_alpha_threshold_core) {
@@ -185,18 +221,16 @@ namespace htgs::rasterization::hybrid_blend::kernels::inference {
                 else depth_pixel += transmittance_core * rgba_premultiplied.w * depth;
                 transmittance_core *= 1.0f - rgba_premultiplied.w;
             }
-            float total_alpha;
-            if (!use_median_depth) total_alpha = 1.0f - transmittance_core;
+            float transmittance_pixel = transmittance_core;
             // blend tail
             if (transmittance_core >= config::transmittance_threshold && rgba_premultiplied_tail.w >= config::min_alpha_threshold) {
                 const float weight_tail = transmittance_core * (1.0f - transmittance_tail);
                 rgb_pixel += weight_tail * (1.0f / rgba_premultiplied_tail.w) * make_float3(rgba_premultiplied_tail);
-                if (!use_median_depth) {
-                    depth_pixel += weight_tail * (1.0f / rgba_premultiplied_tail.w) * depth_premultiplied_tail;
-                    total_alpha += weight_tail;
-                }
+                if (!use_median_depth) depth_pixel += weight_tail * (1.0f / rgba_premultiplied_tail.w) * depth_premultiplied_tail;
+                transmittance_pixel *= transmittance_tail;
             }
-            if (!use_median_depth) depth_pixel = (total_alpha > 0.0f) ? depth_pixel / total_alpha : 0.0f;
+            const float alpha_pixel = 1.0f - transmittance_pixel;
+            if (!use_median_depth) depth_pixel = (transmittance_pixel < 1.0f) ? depth_pixel / alpha_pixel : 0.0f;
             // store results
             const int pixel_idx = width * pixel_coords.y + pixel_coords.x;
             if (output_chw) {
@@ -212,6 +246,7 @@ namespace htgs::rasterization::hybrid_blend::kernels::inference {
                 image[base_idx + 2] = __saturatef(rgb_pixel.z);
             }
             depths[pixel_idx] = depth_pixel;
+            alphas[pixel_idx] = transmittance_pixel < config::transmittance_threshold ? 1.0f : alpha_pixel;
         }
     }
 

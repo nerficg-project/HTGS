@@ -24,9 +24,14 @@ namespace htgs::rasterization::oit_blend {
         const int total_sh_bases,
         const int width,
         const int height,
+        const float focal_x,
+        const float focal_y,
+        const float center_x,
+        const float center_y,
         const float near_plane,
         const float far_plane,
         const float scale_modifier,
+        const bool use_aaa_mode,
         const bool to_chw);
 
 }
