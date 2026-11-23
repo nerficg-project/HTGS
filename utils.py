@@ -30,7 +30,7 @@ def extract_settings(
     use_aaa_mode: bool,
 ) -> RasterizerSettings:
     if not isinstance(view.camera, PerspectiveCamera):
-        raise Framework.RendererError('HTGSv2 renderer only supports perspective cameras')
+        raise Framework.RendererError('HTGS renderer only supports perspective cameras')
     if view.camera.distortion is not None:
         Logger.log_warning('found distortion parameters that will be ignored by the rasterizer')
     try:

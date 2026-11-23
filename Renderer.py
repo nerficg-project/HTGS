@@ -11,7 +11,6 @@ from Methods.Base.Renderer import BaseRenderer
 from Methods.HTGS.HTGSCudaBackend import diff_rasterize, rasterize, fast_rasterize, update_max_weights
 from Methods.HTGS.Model import HTGSModel
 from Methods.HTGS.utils import extract_settings
-from Visual.utils import apply_color_map
 
 
 @Framework.Configurable.configure(
